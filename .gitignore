@@ -4,3 +4,10 @@
 !.env.op
 /.agents/local.json
 /.agents/skills
+
+# third-party docs shipped with Arturia's scripts; never commit
+*.pdf
+*.jpg
+# scratch
+__pycache__/
+*.pyc

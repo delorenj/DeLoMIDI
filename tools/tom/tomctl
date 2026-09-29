@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# tomctl: drive tom's interactive desktop and filesystem from big-chungus (see README.md).
+# Needs an `ssh tom` alias (~/.ssh/config: HostName, User=admin account, key) so no host details live in the repo.
+#   tomctl shot [name]                 screenshot -> $TOMCTL_OUT/<name>_half.png (full-res <name>.png alongside)
+#   tomctl do "click 100 200; key F10" [name]   input commands (';'-separated) then screenshot
+#   tomctl ps 'Get-Process FL64'       PowerShell on tom as the admin account (session 0)
+#   tomctl put <local> <C:/win/path>   copy a file to tom      tomctl get <C:/win/path> <local>   copy back
+#   tomctl up                          exit 0 if tom answers SSH
+set -euo pipefail
+OUT=${TOMCTL_OUT:-/tmp/tomctl}; mkdir -p "$OUT"
+SSHO=(-o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=3)
+t()  { timeout "${TOMCTL_TIMEOUT:-90}" ssh "${SSHO[@]}" tom "$@"; }
+cp_() { timeout "${TOMCTL_TIMEOUT:-90}" scp -q "${SSHO[@]}" "$@"; }
+RUNI='powershell -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\DeLoMIDI\runi.ps1 -Script'
+shot() { local n=${1:-shot}
+  t "$RUNI C:\\ProgramData\\DeLoMIDI\\shot.ps1" >/dev/null
+  cp_ "tom:C:/ProgramData/DeLoMIDI/shot.png" "$OUT/$n.png"
+  python3 -c "from PIL import Image; im=Image.open('$OUT/$n.png'); im.resize((im.width//2, im.height//2)).save('$OUT/${n}_half.png')"
+  echo "$OUT/${n}_half.png"; }
+case "${1:-}" in
+  shot) shot "${2:-shot}" ;;
+  do)   printf '%s\n' "${2//;/$'\n'}" > "$OUT/cmd.txt"
+        cp_ "$OUT/cmd.txt" "tom:C:/ProgramData/DeLoMIDI/cmd.txt"
+        t "$RUNI C:\\ProgramData\\DeLoMIDI\\input.ps1" | tail -1
+        sleep 0.8; shot "${3:-after}" ;;
+  ps)   t "powershell -NoProfile -NonInteractive -Command -" <<<"${2:?powershell text}" ;;
+  put)  cp_ "${2:?local}" "tom:${3:?remote}" ;;
+  get)  cp_ "tom:${2:?remote}" "${3:?local}" ;;
+  up)   t "echo up" >/dev/null 2>&1 ;;
+  *)    sed -n '2,10p' "$0"; exit 2 ;;
+esac
