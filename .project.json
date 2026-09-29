@@ -1,0 +1,14 @@
+{
+  "project_name": "DeLoMIDI",
+  "project_description": "",
+  "project_id": "delomidi",
+  "repo_path": "",
+  "ticket_provider": {
+    "type": "plane",
+    "workspace": "33god",
+    "identifier": "DELO",
+    "board_id": "",
+    "board_url": ""
+  },
+  "agents": {}
+}
