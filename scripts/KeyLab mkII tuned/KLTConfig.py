@@ -8,9 +8,16 @@ finding (docs/analysis F-/O-/G- id) it belongs to. Sections are owned by the sid
 
 # ---- shared: diagnostics (KLTLog) -------------------------------------------------------------------------
 LOG_ENABLED = True                              # write klt.log; never raises, never blocks FL
-LOG_PATH = r'C:\ProgramData\DeLoMIDI\klt.log'   # the folder must exist and be writable by the FL user
+LOG_PATH = r'C:\ProgramData\DeLoMIDI\klt.log'   # the folder is created if it is missing; it must be writable by the FL user
 LOG_MAX_BYTES = 512 * 1024                      # log is truncated (keeps the tail) beyond this size
 LOG_MAX_LINES_PER_SEC = 50                      # flood guard; dropped lines are counted and reported
+LOG_RETRY_S = 30.0                              # a log path that failed is tried again this often (never given up for good). Order:
+                                                # LOG_PATH (its folder is created if missing), then <temp>\klt.log, then the script
+                                                # folder; the first fallback in use is printed once to FL's Script output
+LOG_RING_LINES = 500                            # KLT H-FL-IO: the newest N log lines are always kept in memory (KLTLog.dump()), because FL 26.1.6's
+                                                # embedded Python cannot open() any file (SystemError), so klt.log is only a bonus where it works
+LOG_TO_CONSOLE = 'auto'                         # print log lines to FL's Script output: 'auto' = only while writing the file fails, True = always, False = never
+LOG_CONSOLE_MAX_LINES_PER_SEC = 10              # console flood guard (lines over the cap are still in the ring, and counted)
 LOG_RAW_EVENTS = False                          # log every raw MIDI event (chatty; for protocol capture)
 
 # ---- output side: LEDs / LCD / lifecycle (owned by the output-side implementer) ---------------------------
@@ -18,8 +25,13 @@ LOG_RAW_EVENTS = False                          # log every raw MIDI event (chat
 
 # Safety gate (O-01): nothing is ever sent to the keyboard unless FL says the script has a MIDI output.
 OUT_ENABLED = True                  # master kill switch: False = the scripts never call device.midiOutSysex
-OUT_REQUIRE_MIDIOUT_ASSIGNED = True # also require device.isMidiOutAssigned() (undocumented) after isAssigned() is True;
-                                    # False = trust isAssigned() alone. Either way an unanswerable query = not assigned
+OUT_REQUIRE_MIDIOUT_ASSIGNED = False # also require device.isMidiOutAssigned() after isAssigned() is True (PROBE PROFILE, opt-in). The
+                                    # stub calls it "not officially documented" and crash-warned, no Image-Line script uses it and
+                                    # it adds nothing to the documented isAssigned(); False = trust isAssigned() alone (as
+                                    # MackieCU does). When on: only a literal False or an exception refuses (0/None do not)
+OUT_DEFER_TO_IDLE = True            # nothing is asked of FL or sent to the keyboard from inside OnInit/OnRefresh: frames wait in the
+                                    # queue and leave from the first OnIdle tick (the tom probe died inside OnInit); False = as before
+OUT_DEFER_TIMEOUT_S = 3.0           # ... unless no OnIdle tick has arrived this long after OnInit: then any callback may send (as before)
 OUT_UNASSIGNED_RECHECK_S = 0.5      # while unassigned, ask FL again at most this often (assigned is asked before every send)
 OUT_FAIL_BACKOFF_S = 5.0            # midiOutSysex raised 5 times in a row: stop sending for this long
 
@@ -29,8 +41,15 @@ OUT_MAX_SYSEX_PER_TICK = 8          # at most this many frames inside one OUT_TI
 OUT_TICK_S = 0.02                   # FL documents OnIdle as "roughly once every 20 ms"
 OUT_LCD_MIN_GAP_S = 0.035           # minimum spacing of LCD frames (community-tested; unchanged text is never re-sent)
 OUT_LED_PASS_S = 0.1                # how often OnIdle re-evaluates the polled LEDs (stock: every tick)
-OUT_TRICKLE_S = 1.0                 # keep-alive: re-send ONE known LED frame this often when idle (0 = off); heals a
-                                    # keyboard that lost its LEDs (power cycle, memory switch) without FL telling us
+OUT_TRICKLE_S = 1.0                 # keep-alive: the longest gap between two re-sent known LED frames when idle (0 = keep-alive off);
+                                    # heals a keyboard that lost its LEDs (power cycle, memory switch) without FL telling us
+OUT_KEEPALIVE_CYCLE_S = 3.0         # ... and the whole shadow (about 44 LED frames) is re-asserted within this time: the gap is
+                                    # min(OUT_TRICKLE_S, cycle / number of LEDs), never below OUT_KEEPALIVE_MIN_GAP_S. 0 = legacy
+                                    # (one frame per OUT_TRICKLE_S, i.e. up to 44 s for a full round). About 15 frames/s at idle
+OUT_KEEPALIVE_MIN_GAP_S = 0.05      # the keep-alive never sends faster than 20 frames/s, whatever the cycle says
+OUT_SETTLE_REPAINT_S = (0.5, 2.0)   # after a memory switch / full-refresh request / output re-appearing the keyboard may still be
+                                    # resetting itself when the immediate repaint lands: repaint everything again this long after
+                                    # (each entry once; () = off)
 OUT_LCD_KEEPALIVE_S = 10.0          # keep-alive for the LCD frame (0 = off)
 OUT_HOLD_TIMEOUT_S = 5.0            # LEDs are held back while the init sequence runs; released after this long even
                                     # if OnIdle never advanced it
@@ -65,9 +84,10 @@ CLEAR_LEDS_ON_DEINIT = False        # True = also black out the pads/select LEDs
 
 # Diagnostics (O-15). Every native device.* call is announced in klt.log BEFORE it is made ("probe ...", "gate: ..."), and the
 # log is appended line by line, so if FL ever dies inside one the last line on disk names it.
-LOG_DEVICE_DETAILS = True           # the init banner also asks device.isMidiOutAssigned / getPortNumber / getName (only when the
-                                    # script has an output). Set False, with OUT_REQUIRE_MIDIOUT_ASSIGNED = False, to make
-                                    # device.isAssigned() the only device query of the whole script (crash bisecting)
+LOG_DEVICE_DETAILS = False          # PROBE PROFILE (opt-in): the init banner also asks general.getVersion, device.isMidiOutAssigned /
+                                    # getPortNumber / getName (the last three only when the script has an output). Default False, with
+                                    # OUT_REQUIRE_MIDIOUT_ASSIGNED = False, makes device.isAssigned() the only native query of the
+                                    # whole script. Switch on for a bisect once the first attach has worked (docs/tuned/CHANGES-output.md)
 LOG_DEVICE_ID = False               # also log device.getDeviceID() in the init banner (API 25+, unverified on FL 26.1.6)
 
 # ---- input side: controls / Forward script (owned by the input-side implementer) --------------------------
@@ -76,8 +96,11 @@ LOG_DEVICE_ID = False               # also log device.getDeviceID() in the init 
 # every switch below whose default differs from Arturia's script says so. Read klt.log first (PROBE / UNMAPPED lines).
 
 # Unmapped events (F-03): a note/CC/pitch-bend nobody claims used to be swallowed silently.
-PASS_UNMAPPED = True                # True = leave event.handled False so FL processes it normally (safest); False = swallow
-                                    # it like Arturia's script did for ch1 notes / CCs / faders. A note-off (0x80) is never swallowed
+PASS_UNMAPPED = False               # DAW-PORT processor only. False = swallow an unmapped ch1 note / CC / fader like Arturia's script
+                                    # did (a panel button nobody claims - Next/Previous with Bank off, Category, Preset, the 9th
+                                    # Select button - would otherwise be a note on the selected channel); True = leave event.handled
+                                    # False so FL processes it. A note-off (0x80) is never swallowed. The KEYBOARD-port (Forward)
+                                    # script never swallows an unmapped event, whatever this says (keybed, pedals, mod wheel)
 LOG_UNMAPPED = True                 # log each distinct unmapped (port, status, data1) once (and again at x10/x100/x1000)
 LOG_UNMAPPED_MAX_KEYS = 300         # remember at most this many distinct unmapped ids (flood guard)
 

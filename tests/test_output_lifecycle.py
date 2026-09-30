@@ -143,7 +143,7 @@ def test_the_splash_shows_the_welcome_then_the_script_tag_then_the_main_page(mak
     rig.settle(4.0)
     tl = _lcd_timeline(rig, t0)
     version = entry_module().KLT_VERSION
-    assert tl[0] == (0.0, "KeyLab mkII", "FL Studio 2026")
+    assert tl[0][1:] == ("KeyLab mkII", "FL Studio 2026") and 0.0 <= tl[0][0] <= 0.02 + 1e-6   # the first OnIdle tick (RA-10)
     assert tl[1][1:] == ("KeyLab mkII", "tuned v" + version) and 1.5 <= tl[1][0] <= 1.6
     assert tl[2][1:] == ("1 - Kick", "Pattern 1") and 2.5 <= tl[2][0] <= 2.6
     assert rig.host.clock.slept_total == 0

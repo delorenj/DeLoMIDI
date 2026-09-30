@@ -76,7 +76,10 @@ class MidiEventDispatcher:
 #   shadow      what the keyboard is believed to show, per LED id / LCD; an unchanged frame is never re-sent (O-02)
 #   pending     the newest wanted frame per LED id / LCD, delivered within the budgets, latest wins (O-06)
 #   budgets     hard frames-per-second cap, frames-per-OnIdle-tick cap, LCD minimum gap (O-02, O-06)
-#   keep-alive  one known frame re-sent per OUT_TRICKLE_S so a keyboard that lost its state heals (O-05)
+#   keep-alive  known frames re-sent one at a time, the whole shadow within OUT_KEEPALIVE_CYCLE_S, so a keyboard that lost
+#               its state heals in seconds (O-05); settle repaints follow the events that make the keyboard reset itself
+#   deferral    nothing is asked of FL and nothing is sent until the first OnIdle tick (OUT_DEFER_TO_IDLE): the tom probe died
+#               inside OnInit, and nothing needs the keyboard before the first tick
 
 # KLT O-01: the SysEx framing is byte-identical to stock: F0 00 20 6B 7F 42 <payload> F7
 HEADER = bytes([0xF0, 0x00, 0x20, 0x6B, 0x7F, 0x42])
@@ -144,6 +147,9 @@ class OutputLayer:
         self._backoff_until = 0.0
         self._fail_streak = 0
         self._resync_flag = False
+        self._armed = False         # KLT O-01: False until the first service() (OnIdle) after OnInit: nothing is asked or sent before
+        self._reset_at = -1e9       # KLT O-01: monotonic time of the last reset() (OnInit): the deferral is bounded by it
+        self._settle = []           # KLT O-05: monotonic times at which the caller must repaint everything once more
         self._trickle_at = None
         self._trickle_i = 0
         self._stats_at = None
@@ -163,6 +169,9 @@ class OutputLayer:
         self._unassigned_until = self._backoff_until = 0.0
         self._fail_streak = 0
         self._resync_flag = False
+        self._armed = False
+        self._reset_at = time.monotonic()
+        self._settle = []
         self._trickle_at = None
         self._trickle_i = 0
         self._stats_at = None
@@ -190,6 +199,30 @@ class OutputLayer:
         """True once after the output (re)appeared: the caller must repaint everything it owns."""
         f, self._resync_flag = self._resync_flag, False
         return f
+
+    def schedule_settle(self):
+        """KLT O-05: the keyboard may still be resetting itself (memory switch, full refresh) when the immediate repaint lands:
+        ask the caller to repaint everything again at each OUT_SETTLE_REPAINT_S offset from now. A newer event restarts the
+        schedule instead of stacking on it."""
+        try:
+            now = time.monotonic()
+            delays = _cfg('OUT_SETTLE_REPAINT_S', (0.5, 2.0))
+            if isinstance(delays, (int, float)):
+                delays = (delays,)              # a single number is one repaint
+            self._settle = sorted(now + float(d) for d in delays if float(d) > 0)
+        except Exception:
+            self._settle = []
+
+    def take_settle(self):
+        """True once for each settle time that has passed (only while the output is open); the caller repaints everything."""
+        if not self._settle or self._gate_open is not True or self._closed:
+            return False
+        now = time.monotonic()
+        if now < self._settle[0]:
+            return False
+        while self._settle and now >= self._settle[0]:
+            self._settle.pop(0)
+        return True
 
     def set_hold(self, on):
         self._hold = bool(on)
@@ -219,7 +252,9 @@ class OutputLayer:
             return False, 'device.isAssigned() raised %r' % (e,)
         if not assigned:
             return False, 'device.isAssigned() is False'
-        if _cfg('OUT_REQUIRE_MIDIOUT_ASSIGNED', True):
+        # KLT O-01: the undocumented, crash-warned isMidiOutAssigned() is opt-in (probe profile). isAssigned() already said yes,
+        # so only a literal False (or an exception) refuses: a 0/None answer used to close the gate for good on a correct setup
+        if _cfg('OUT_REQUIRE_MIDIOUT_ASSIGNED', False):
             fn = getattr(device, 'isMidiOutAssigned', None)
             if fn is not None:
                 try:
@@ -227,9 +262,15 @@ class OutputLayer:
                     out = fn()
                 except Exception as e:
                     return False, 'device.isMidiOutAssigned() raised %r' % (e,)
-                if not out:
+                if out is False:
                     return False, 'device.isAssigned() is True but device.isMidiOutAssigned() is %r' % (out,)
         return True, ''
+
+    def _deferred(self):
+        """KLT O-01: True until the first OnIdle tick after OnInit (OUT_DEFER_TO_IDLE): the gate is not asked, nothing is sent.
+        Bounded by OUT_DEFER_TIMEOUT_S, so a script whose OnIdle never runs still sends from its other callbacks as before."""
+        return (not self._armed and not self._shutdown and _cfg('OUT_DEFER_TO_IDLE', True)
+                and time.monotonic() - self._reset_at < _cfg('OUT_DEFER_TIMEOUT_S', 3.0))
 
     def ready(self):
         """True only if calling device.midiOutSysex is safe right now. Asks FL every time it answers yes; a 'no' is
@@ -238,6 +279,8 @@ class OutputLayer:
             now = time.monotonic()
             if self._closed and not self._shutdown:
                 return False
+            if self._deferred():
+                return False            # KLT O-01: not asked from inside OnInit / OnRefresh; the first OnIdle tick asks
             if not _cfg('OUT_ENABLED', True):
                 self._observe(False, 'OUT_ENABLED is False in KLTConfig', now)
                 return False
@@ -267,8 +310,9 @@ class OutputLayer:
                 msg = 'output is switched off (%s): nothing is sent to the keyboard' % why
             else:
                 msg = ('no MIDI output for this script (%s): nothing is sent, the keyboard stays dark. In FL: Options > '
-                       'MIDI settings > Output, enable the KeyLab DAW port and give it the same port number as its '
-                       'input.' % why)
+                       'MIDI settings > Output, enable the KeyLab DAW port (MIDIOUT2) and give it the same port number as '
+                       'its input (MIDIIN2, guide: 0); no other MIDI output may use that number (the main KeyLab output '
+                       'must be 1, or disabled).' % why)
             if 'isMidiOutAssigned' in why:
                 msg += (' If the output IS assigned in FL, set OUT_REQUIRE_MIDIOUT_ASSIGNED = False in KLTConfig.py (that '
                         'query is undocumented).')
@@ -318,7 +362,9 @@ class OutputLayer:
         if key is not None:
             self._shadow[key] = data
         if self.stats['sent'] == 0:
-            KLTLog.log('output: first frame delivered to the keyboard (%d bytes)' % (len(data) + 7))
+            # KLT O-01: FL does not confirm delivery, and isAssigned() only says an output is linked by port number
+            KLTLog.log('output: first frame handed to FL for the keyboard (%d bytes); FL does not confirm delivery: the '
+                       'acceptance test is the greeting on the keyboard LCD ("KeyLab mkII" / "tuned v...")' % (len(data) + 7))
         self.stats['sent'] += 1
         return True
 
@@ -347,6 +393,14 @@ class OutputLayer:
             if not _cfg('OUT_ENABLED', True):
                 self.stats['gated'] += 1
                 return False
+            if self._deferred():
+                # KLT O-01: inside OnInit/OnRefresh nothing is asked of FL and nothing is sent: the newest wanted frame per LED /
+                # LCD waits in the queue and leaves from the first OnIdle tick (unanswerable then = dropped like any other gate)
+                if force or key is None:
+                    self.stats['gated'] += 1
+                    return False
+                self._pending[key] = data
+                return True
             if force or key is None:
                 return self._send_now(key, data)
             if self._gate_open is not True and not self.ready():
@@ -371,7 +425,7 @@ class OutputLayer:
     def pump(self):
         """Deliver pending frames, oldest first, inside the budgets. Returns the number sent. Never raises."""
         try:
-            if self._batch or not self._pending:
+            if self._batch or not self._pending or self._deferred():
                 return 0
             now = time.monotonic()
             if self._hold and now - self._hold_since > _cfg('OUT_HOLD_TIMEOUT_S', 5.0):
@@ -411,6 +465,7 @@ class OutputLayer:
             now = time.monotonic()
             if self._closed:
                 return
+            self._armed = True                  # KLT O-01: the first OnIdle tick after OnInit: from here the gate is asked
             if self._gate_open is not True and now >= self._unassigned_until:
                 self.ready()
             self.pump()
@@ -427,8 +482,22 @@ class OutputLayer:
         except Exception as e:
             KLTLog.log_once(('out-service-exc', type(e).__name__), 'output: service() failed: %r' % (e,))
 
+    def _keepalive_gap(self):
+        """Seconds between two keep-alive frames (0 = keep-alive off). KLT O-05: OUT_TRICKLE_S is the longest gap; with
+        OUT_KEEPALIVE_CYCLE_S the gap shrinks so the whole shadow is re-asserted within that time (44 LEDs in 3 s), but never
+        below OUT_KEEPALIVE_MIN_GAP_S. A keyboard that lost its LEDs without telling FL used to heal in up to 43 s."""
+        every = _cfg('OUT_TRICKLE_S', 1.0)
+        if every <= 0:
+            return 0.0
+        cycle = _cfg('OUT_KEEPALIVE_CYCLE_S', 3.0)
+        if cycle > 0:
+            n = len(self._shadow) - (1 if _LCD in self._shadow else 0)
+            if n > 0:
+                every = min(every, max(cycle / n, _cfg('OUT_KEEPALIVE_MIN_GAP_S', 0.05)))
+        return every
+
     def _keepalive(self, now):
-        """When nothing else is going on, re-send one already-delivered frame per OUT_TRICKLE_S (and the LCD per
+        """When nothing else is going on, re-send one already-delivered frame per keep-alive gap (and the LCD per
         OUT_LCD_KEEPALIVE_S): a keyboard that lost its LEDs or text comes back without FL having to tell us."""
         if self._hold or self._pending or self._batch or not self._shadow or self._gate_open is not True:
             return
@@ -436,18 +505,20 @@ class OutputLayer:
         if lcd_every > 0 and _LCD in self._shadow and now - self._last_lcd >= lcd_every:
             self._resend(_LCD, now)
             return
-        every = _cfg('OUT_TRICKLE_S', 1.0)
+        every = self._keepalive_gap()
         if every <= 0:
             return
         if self._trickle_at is None:
             self._trickle_at = now
             return
-        if now - self._trickle_at < every:
+        if now - self._trickle_at < every - _EPS:
             return
         keys = [k for k in self._shadow if k != _LCD]
         if not keys:
             return
-        self._trickle_at = now
+        # KLT O-05: carry the remainder of the tick instead of restarting the gap at `now`: with a 20 ms tick a 68 ms gap would
+        # otherwise become 80 ms and the 3 s cycle 3.5 s (lateness stays bounded to one gap after a pause)
+        self._trickle_at = max(self._trickle_at + every, now - every)
         k = keys[self._trickle_i % len(keys)]
         self._trickle_i += 1
         self._resend(k, now)
@@ -514,6 +585,14 @@ def resync():
 
 def take_resync():
     return _out.take_resync()
+
+
+def schedule_settle():
+    _out.schedule_settle()
+
+
+def take_settle():
+    return _out.take_settle()
 
 
 def hold_leds(on):

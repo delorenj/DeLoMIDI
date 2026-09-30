@@ -329,6 +329,7 @@ class KeyLabMidiProcessor:
 
         self._mk2 = mk2
         self._mapped = False
+        self._from_keyboard_port = False               # KLT F-03: the event being processed came through the Forward script
         self._scrubbing = {1 : False, -1 : False}      # KLT F-23: << / >> currently scrubbing the transport
         self._editors = set()                          # KLT F-14: channels whose editor this script opened
 
@@ -418,6 +419,7 @@ class KeyLabMidiProcessor:
             AKLmk2.raw_log(where, event)
             AKLmk2.probe(where, event)
         self._mapped = False
+        self._from_keyboard_port = str(where or '').startswith('Forward')     # KLT F-03: which port's policy for unmapped events
         sync_mode_from_focus()          # KLT F-12: mode follows the focused window
         AKLmk2.clamp_banks()            # KLT F-12: offsets stay inside the live counts
         status = event.status
@@ -433,7 +435,10 @@ class KeyLabMidiProcessor:
     def _consume(self, dispatcher, event, where) :
         # KLT F-03: stock set event.handled = True BEFORE looking at the table, so every unmapped note / CC / bend on
         # channel 1 was swallowed without a trace. Now only an event a handler exists for is consumed; the rest is logged
-        # and (KLTConfig.PASS_UNMAPPED) left to FL. A mapped control whose handler failed stays consumed (as before).
+        # and what happens to it is per PORT (review RA-01, RA-04): on the DAW port it is a panel button nobody claims, so
+        # KLTConfig.PASS_UNMAPPED (default False = stock: swallowed) decides; on the KEYBOARD port (the Forward script's
+        # processor path) it is keybed, pedal or wheel traffic and is never swallowed, whatever the switch says.
+        # A mapped control whose handler failed stays consumed (as before).
         try :
             mapped = dispatcher.Dispatch(event)
         except Exception :
@@ -443,8 +448,9 @@ class KeyLabMidiProcessor:
             self._mapped = True
             event.handled = True
         else :
-            AKLmk2.note_unmapped(event, where)
-            if not CFG.PASS_UNMAPPED and (event.status & 0xF0) != 0x80 :
+            swallow = (not CFG.PASS_UNMAPPED and not self._from_keyboard_port and (event.status & 0xF0) != 0x80)
+            AKLmk2.note_unmapped(event, where, swallowed=swallow)
+            if swallow :
                 event.handled = True
 
     def OnCommandEvent(self, event):

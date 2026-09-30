@@ -7,6 +7,8 @@ plus whether the two device scripts share one Python interpreter (F-17). The scr
 they derive everything from status/data1/data2, so the answer is diagnostic only. Tuned folder only."""
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from tests.test_input_helpers import fresh_second, fwd, log_lines, tuned_only
@@ -105,7 +107,10 @@ def test_raw_event_logging_is_off_by_default(probing):
 
 def test_a_broken_log_path_never_breaks_an_event(probing):
     """KLTLog swallows its own I/O errors: an unwritable klt.log must not cost a single control."""
-    probing.host.set_config(LOG_PATH="/nonexistent-dir/none/klt.log", PROBE_MIDI_FIELDS=True, LOG_RAW_EVENTS=True)
+    blocker = os.path.join(probing.host.tmpdir, "blocker")          # a regular file: the log's folder can never be created
+    with open(blocker, "w") as f:
+        f.write("x")
+    probing.host.set_config(LOG_PATH=os.path.join(blocker, "none", "klt.log"), PROBE_MIDI_FIELDS=True, LOG_RAW_EVENTS=True)
     a = probing.button(94, True)
     b = fwd(probing, 0xB0, 74, 12)
     assert a.errors == [] and a.called("transport.start") and b.errors == []

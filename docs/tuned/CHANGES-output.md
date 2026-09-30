@@ -19,19 +19,24 @@ FL callbacks (all wrapped in KLTLog.guarded, routines isolated with _step)
         +--------------------- send_to_device(payload) -----+
                                      |
                               KLTDispatch.OutputLayer  (the ONLY caller of device.midiOutSysex)
-        gate      device.isAssigned() [then device.isMidiOutAssigned()] asked before every send; unanswerable = no
+        gate      device.isAssigned() asked before every send; unanswerable = no (isMidiOutAssigned only in the probe profile)
+        deferral  nothing is asked or sent until the first OnIdle tick after OnInit (bounded by OUT_DEFER_TIMEOUT_S)
         shadow    what the keyboard is believed to show, per LED id / LCD; an unchanged frame is never re-sent
         pending   newest wanted frame per LED id / LCD, latest wins; `with batch():` = final state per callback only
         budgets   hard cap per sliding second, cap per tick (20 ms window), LCD minimum gap; a deferred frame is sent later
-        keep-alive one already-delivered frame re-sent per second when idle (LCD every 10 s): a keyboard that lost its state heals
+        keep-alive already-delivered frames re-sent one at a time, the whole shadow within 3 s (LCD every 10 s); settle repaints
+                   after a memory switch / full refresh / reconnect: a keyboard that lost its state heals in seconds
 ```
 
-* **OnInit** neither sleeps nor sends a burst: it logs the banner, resets state, builds the objects, sets the main page,
-  starts the (non-blocking) splash and *arms* the staged init. It sends the welcome LCD frame and nothing else.
+* **OnInit** neither sleeps nor sends: it logs the banner, resets state, builds the objects, sets the main page,
+  starts the (non-blocking) splash and *arms* the staged init. The welcome LCD frame is queued and leaves from the first
+  `OnIdle` tick (review round 1: the tom probe died inside `OnInit`, and nothing needs the keyboard before the first tick).
 * **Staged init** (`KLTReturn.InitStep`, advanced once per `OnIdle` tick): wait for the output -> optional pad animation
   (`INIT_ANIMATION`, `INIT_FRAMES_PER_TICK` frames per tick) -> release the LEDs, which then paint what FL state says. LED frames
   requested while it runs are held (latest wins); the hold auto-releases if `OnIdle` stops advancing it for `OUT_HOLD_TIMEOUT_S`.
   With the device absent it just waits, sends nothing and blocks nothing; when the output appears it runs and repaints.
+  When the sequence is done the pads and Play/Stop/Record LEDs are painted once by the script itself (review round 1: they
+  used to depend on FL sending an `OnRefresh` after `OnInit`, which nobody has shown it does).
 * **OnIdle** (about 50 Hz) delivers pending frames, notices the output appearing, runs the LCD refresh, and polls the LEDs at
   `OUT_LED_PASS_S` (100 ms): only changes reach the wire. Pads, Play/Stop/Record LEDs still follow `OnRefresh`/beat callbacks
   as in stock, plus a repaint of the pads when the pad layout changes (Drum/Sequencer, bar, loop mode).
@@ -45,8 +50,8 @@ Measured in the simulator (same scripted sessions, `docs/tuned/TESTING.md` scena
 | SysEx/s, Channel Rack, FL state changing every 2 s | 1,209 avg, 1,220 worst (15.9 KB/s) | 1.8 avg, 4 worst (27 B/s) |
 | SysEx/s, Mixer mode | 1,209 / 1,220 | 1.7 / 4 |
 | SysEx/s, Sequencer mode playing at 120 bpm | 1,338 / 1,360 (17.8 KB/s) | 20 / 35 (294 B/s) |
-| SysEx/s, nothing changes | 1,200 | 1.1 (the keep-alive) |
-| `OnInit` | 261 frames incl. `OnRefresh`, `time.sleep` 2.92 s on FL's main thread | 1 frame, no sleep |
+| SysEx/s, nothing changes | 1,200 | 14.7 (the keep-alive: the whole shadow every 3 s; round 0 was 1.1 and took up to 43 s to heal a device-side reset) |
+| `OnInit` | 261 frames incl. `OnRefresh`, `time.sleep` 2.92 s on FL's main thread | 0 frames (the welcome frame leaves from the first `OnIdle` tick), no sleep |
 | time until the LEDs show FL's state (Select buttons, Solo/Mute, transport) | 2.92 s, after the blocking `OnInit` | 0.12 s (6 ticks of at most 8 frames) |
 | hard limits | none | 100 frames in any second, 8 in any 20 ms tick, LCD frames 35 ms apart |
 
@@ -58,21 +63,21 @@ init, splash), `_leds.py` (LED semantics, byte identity with stock), `_fuzz.py` 
 
 | finding | change | switch(es) | test(s) |
 |---|---|---|---|
-| **O-01** high: no `isAssigned` guard; unassigned output = dark keyboard, possibly the FL 26.1.6 crash | `KLTDispatch.OutputLayer` is the only caller of `device.midiOutSysex`. Before a send it asks `device.isAssigned()`, then `device.isMidiOutAssigned()` (only if the first said yes); an exception or a "no" from either means not assigned (fail safe); a missing `isMidiOutAssigned` falls back to `isAssigned`. "No" is remembered 0.5 s and logged **once** (klt.log + FL Script output) with the FL menu path to fix it. While unassigned the only device call is `isAssigned`. Nothing is sent after `OnDeInit`. 5 failing `midiOutSysex` in a row pause output for 5 s. No device call at import time. The output appearing later triggers a full repaint | `OUT_ENABLED`, `OUT_REQUIRE_MIDIOUT_ASSIGNED`, `OUT_UNASSIGNED_RECHECK_S`, `OUT_FAIL_BACKOFF_S` | gate: `no_frame_and_no_crash_when_no_output_is_assigned[crash,noop]`, `only_device_call...isassigned`, `reported_once`, `ismidioutassigned_*`, `a_query_that_raises`, `assigning_the_output_later`, `unassigning...at_run_time`, `failing_midioutsysex_backs_off`, `nothing_is_sent_after_ondeinit`; lifecycle `test_unassigned_output_is_never_written_to`, `..._checked_before_the_first_sysex`, fuzz FLCrash tests; `test_output_fuzz.py` |
-| **O-02** high: 22-24 frames per idle tick, no shadow state | shadow state per LED id and LCD (send only changes); pending queue, latest wins; `with batch():` per callback (a pad repainted and then highlighted is sent once); LED routines polled every `OUT_LED_PASS_S`; hard per-second cap and per-tick cap; keep-alive of one known frame per `OUT_TRICKLE_S` (LCD per `OUT_LCD_KEEPALIVE_S`); counters logged every `OUT_STATS_LOG_S` | `OUT_MAX_SYSEX_PER_SEC`, `OUT_MAX_SYSEX_PER_TICK`, `OUT_TICK_S`, `OUT_LED_PASS_S`, `OUT_TRICKLE_S`, `OUT_LCD_KEEPALIVE_S`, `OUT_STATS_LOG_S` | budget: `per_second_cap_holds[20,60,100]`, `per_tick_cap_holds[1,4,8]`, `budgets_change_when_the_keyboard_is_told_never_what_it_ends_up_showing`, `quiet_idle_*`, `keep_alive_*`, `only_changed_leds_are_sent`, `change_that_reverts...`, `frames_of_one_callback_are_coalesced`, `polled_leds_are_evaluated_at_the_pass_interval`, `output_counters_*`; `test_idle_budget.py` (3 scenarios + quiet) |
+| **O-01** high: no `isAssigned` guard; unassigned output = dark keyboard, possibly the FL 26.1.6 crash | `KLTDispatch.OutputLayer` is the only caller of `device.midiOutSysex`. Before a send it asks `device.isAssigned()`; an exception or a "no" means not assigned (fail safe). Review round 1: the undocumented, crash-warned `device.isMidiOutAssigned()` is **opt-in** (`OUT_REQUIRE_MIDIOUT_ASSIGNED`, probe profile): asked only after `isAssigned()` said yes, and then only a literal `False` or an exception refuses (a `0`/`None` answer used to darken the keyboard for good); a missing `isMidiOutAssigned` falls back to `isAssigned`. Nothing is asked or sent before the first `OnIdle` tick. "No" is remembered 0.5 s and logged **once** (klt.log + FL Script output) with the FL menu path to fix it. While unassigned the only device call is `isAssigned`. Nothing is sent after `OnDeInit`. 5 failing `midiOutSysex` in a row pause output for 5 s. No device call at import time. The output appearing later triggers a full repaint | `OUT_ENABLED`, `OUT_REQUIRE_MIDIOUT_ASSIGNED`, `OUT_DEFER_TO_IDLE`, `OUT_DEFER_TIMEOUT_S`, `OUT_UNASSIGNED_RECHECK_S`, `OUT_FAIL_BACKOFF_S` | gate: `no_frame_and_no_crash_when_no_output_is_assigned[crash,noop]`, `only_device_call...isassigned`, `reported_once`, `ismidioutassigned_*`, `a_query_that_raises`, `assigning_the_output_later`, `unassigning...at_run_time`, `failing_midioutsysex_backs_off`, `nothing_is_sent_after_ondeinit`; lifecycle `test_unassigned_output_is_never_written_to`, `..._checked_before_the_first_sysex`, fuzz FLCrash tests; `test_output_fuzz.py` |
+| **O-02** high: 22-24 frames per idle tick, no shadow state | shadow state per LED id and LCD (send only changes); pending queue, latest wins; `with batch():` per callback (a pad repainted and then highlighted is sent once); LED routines polled every `OUT_LED_PASS_S`; hard per-second cap and per-tick cap; keep-alive of one known frame per gap (LCD per `OUT_LCD_KEEPALIVE_S`), the gap chosen so the whole shadow is re-asserted within `OUT_KEEPALIVE_CYCLE_S` (review round 1; `OUT_TRICKLE_S` is the longest gap); counters logged every `OUT_STATS_LOG_S` | `OUT_MAX_SYSEX_PER_SEC`, `OUT_MAX_SYSEX_PER_TICK`, `OUT_TICK_S`, `OUT_LED_PASS_S`, `OUT_TRICKLE_S`, `OUT_KEEPALIVE_CYCLE_S`, `OUT_KEEPALIVE_MIN_GAP_S`, `OUT_LCD_KEEPALIVE_S`, `OUT_STATS_LOG_S` | budget: `per_second_cap_holds[20,60,100]`, `per_tick_cap_holds[1,4,8]`, `budgets_change_when_the_keyboard_is_told_never_what_it_ends_up_showing`, `quiet_idle_*`, `keep_alive_*`, `only_changed_leds_are_sent`, `change_that_reverts...`, `frames_of_one_callback_are_coalesced`, `polled_leds_are_evaluated_at_the_pass_interval`, `output_counters_*`; `test_idle_budget.py` (3 scenarios + quiet) |
 | **O-03** high: strict-ASCII encode poisons the display | `ascii_line` in `SetLines` **before** anything is stored: accents fold (e-acute -> e), typographic punctuation maps, control characters and NUL become a space, the rest `?`; `_lcd_bytes` re-checks and clips to 16 printable bytes; `None`/bytes/numbers accepted; without `unicodedata` falls back to `?` | (none) | display: `ascii_line_returns_printable_ascii_for_anything`, `accents_fold...`, `lcd_bytes_never_exceed_16...`, `no_text_can_poison_the_display_state`, `every_lcd_frame_of_a_session_with_hostile_names...`; lifecycle `test_non_ascii_text_does_not_break_the_display[4]` |
 | **O-04** medium: no exception isolation, `NameError` before init | `_mk2 = _processor = None` from import on; every FL callback wrapped in `KLTLog.guarded` (an AST test checks all `On*`); every routine inside a callback runs through `_step` (one failure logged once per 30 s + printed once, the rest still run); `init()` builds `_mk2` and `_processor` separately (a failing processor keeps LEDs/LCD alive); `Sync` fetches channel and pattern text separately, never passes an invalid index (empty rack -> `No channel`, selection outside the rack -> `No selection`, pattern 0 -> empty) and keeps the last good text when FL fails; `KLTPages` survives a page whose text cannot be produced | (none) | lifecycle: `every_on_callback...guarded`, `one_failing_fl_call_does_not_stop_the_other_leds[10]`, `persistent_failure_is_reported_once`, `processor_that_cannot_be_built...`, `display_objects_that_cannot_be_built...`; display: `main_page_*`, `failing_name_query_keeps_the_last_good_text`; leds: `empty_rack_*`; lead's `test_callbacks_before_oninit...`, `test_partial_init...` |
-| **O-05** medium: LCD cache never invalidated | `KeyLabDisplay.Invalidate()`; called (with a shadow reset and a forced LED pass) on `OnInit`, the memory-switch SysEx, `OnDoFullRefresh`, `OnProjectLoad(>=100)` and when the output re-appears; keep-alive heals the rest | `OUT_TRICKLE_S`, `OUT_LCD_KEEPALIVE_S` | budget: `memory_switch_re_sends_every_led_and_the_lcd`, `full_refresh_request...`, `loaded_project_repaints...`, `keep_alive_re_sends...`; lead's `test_lcd_is_repainted_after_a_memory_switch` |
+| **O-05** medium: LCD cache never invalidated | `KeyLabDisplay.Invalidate()`; called (with a shadow reset and a forced LED pass) on `OnInit`, the memory-switch SysEx, `OnDoFullRefresh`, `OnProjectLoad(>=100)` and when the output re-appears; the keep-alive heals the rest; review round 1: after a memory switch, a full-refresh request and a reconnect everything is repainted again at +0.5 s and +2 s, because the keyboard resets itself on its own schedule | `OUT_TRICKLE_S`, `OUT_KEEPALIVE_CYCLE_S`, `OUT_SETTLE_REPAINT_S`, `OUT_LCD_KEEPALIVE_S` | budget: `memory_switch_re_sends_every_led_and_the_lcd`, `full_refresh_request...`, `loaded_project_repaints...`, `keep_alive_re_sends...`; lead's `test_lcd_is_repainted_after_a_memory_switch` |
 | **O-06** medium: no LCD rate limit | LCD frames at least `OUT_LCD_MIN_GAP_S` apart; a deferred frame stays pending (latest wins) so the final text always arrives | `OUT_LCD_MIN_GAP_S` | budget: `lcd_frames_keep_the_configured_gap...`, `unchanged_lcd_text_is_not_sent_again...`; lead's `test_lcd_frames_are_spaced...` |
 | **O-07** medium: `OnRefresh` ignores flags, pads only follow `OnRefresh` | dedupe makes a repeated refresh free of SysEx (O-02). New: a change of pad layout (Drum/Sequencer mode, bar shown, loop mode) repaints the pads from `OnIdle` instead of relying on the fake Punch message reaching FL as an `OnRefresh`. Flag masking is implemented but **off by default** (what FL signals with `HW_Dirty_Mixer_Controls`/`HW_Dirty_ControlValues` is unverified; Mackie updates mixer LEDs on the former) | `REFRESH_IGNORE_NOISY_FLAGS` (default `False`) | budget: `noisy_refresh_flags_are_processed_by_default...`, `..._can_be_skipped`; lifecycle: `default_per_tick_cap...` (mode change repaint) |
 | **O-08** medium: stale `CH_OFFSET`/modes survive Reload; `IndexError` every idle tick | LED code clamps the bank offset to the rack (`SelectedChannel` rewritten, same bytes, one FL query per slot); `OnInit` calls `KLTProcess.reset_state()` (input side) and resets `KLTReturn`'s globals and any known helper global; `OnProjectLoad`/`OnDoFullRefresh` added | `RESET_HELPER_STATE_ON_INIT` | leds: `stale_channel_bank...`, `stale_mixer_bank...`; lifecycle `oninit_resets_the_stale_state...`, `helper_reset_is_a_switch`, `reload_after_a_session...`; lead's `test_stale_bank_offset...` |
 | **O-09 / F-17** medium: second `_mk2` built by the Forward script | `init(force=False)` creates only what is missing; only the DAW script's `OnInit` passes `force=True` | (none) | lifecycle `init_only_builds_what_is_missing...`, `second_init_from_another_script_does_not_blank_the_lcd`; lead's `test_daw_script_first_boot_order...`. Residual: with `FORWARD_USE_PROCESSOR=True` the Forward script drives the DAW processor and its LCD frames leave through the Forward script's own output (see 5) |
 | **O-10** medium (unverified): pad LED rows may be flipped on 49/88 | `_pad_led(i)`: `0x70+i`, or the vertically flipped id when the switch is on. **Default = stock** until measured on hardware (checklist item 8 of the audit) | `PAD_LED_FLIP_ROWS` | leds: `pad_led_ids_are_stock_by_default`, `flipped_pad_rows_*` |
-| **O-11** medium: port 10 advice | not code; the init banner logs a WARNING when the script reports port 10 (Analog Lab's port) | (none) | gate: `banner_warns_about_port_10` |
+| **O-11** medium: port 10 advice | not code; the init banner logs a WARNING when the script reports port 10 (Analog Lab's port). Review round 1: the port number is only asked in the probe profile (`LOG_DEVICE_DETAILS`), so the warning is too; the default banner states the wiring rule instead | `LOG_DEVICE_DETAILS` | gate: `banner_warns_about_port_10` |
 | **O-12** low: 2.92 s blocking init | the animation became a state machine advanced from `OnIdle`; level 0 (default) = none, 1 = 32-frame pad wipe, 2 = Arturia's 240 frames byte-identical; welcome splash without blocking: `KeyLab mkII` / FL title for `SPLASH_MS`, then `KeyLab mkII` / `tuned v0.1.0` for `SPLASH_TAG_MS` (the line is a callable, no timer), then the main page | `INIT_ANIMATION`, `INIT_FRAMES_PER_TICK`, `SPLASH_MS`, `SPLASH_TAG_MS`, `OUT_HOLD_TIMEOUT_S` | lifecycle: `stock_animation_is_a_switch_and_is_byte_identical`, `short_animation...`, `animation_frames_advance_a_few_per_tick...`, `leds_are_held_back_until...`, `init_that_never_gets_idle_ticks...`, `init_waits_for_a_late_output...`, `staged_init_completes_within_a_second...`, `splash_*`; lead's `test_oninit_does_not_sleep` |
 | **O-13** low: global vs group-relative index | LED code uses `channels.selectedChannel()` (group-relative, like `isChannelSolo/Muted/Selected` and `getGridBit` in API 33+) and never passes an index outside `0..channelCount()-1` | `GROUP_RELATIVE_CHANNELS` (`False` = stock `channelNumber()`) | leds: `led_logic_uses_the_group_relative_selected_channel...`, `global_index_of_stock_is_a_switch` (the simulator has no groups: only the API used can be asserted) |
 | **O-14** low: `getCurrentStepParam` = -1 | velocity clamped to 0..127 before `//4` | (none) | leds: `step_velocity_is_clamped...[8]`; lead's `test_step_parameter_query_failing...` |
-| **O-15** low: misleading log lines | honest `print` lines (`OnInit start`, `OnInit done`, `FAILED`); one klt.log banner line (script name/version, python, FL API, `isAssigned`, `isMidiOutAssigned`, port, name); config summary line; every native call of the attach path is **announced in klt.log before it is made** so a crash leaves the culprit as the last line on disk; incoming SysEx logged once per distinct message; output counters | `LOG_DEVICE_DETAILS`, `LOG_DEVICE_ID` (`getDeviceID`, off) | gate: `the_init_banner_*`, `if_fl_dies_inside_a_native_call_the_last_line_of_the_log_names_it[6]`, `with_details_off...`, `gate_announces_each_native_query_once...`; lifecycle `incoming_sysex_is_logged_once...` |
+| **O-15** low: misleading log lines | honest `print` lines (`OnInit start`, `OnInit done`, `FAILED`); one klt.log banner line (script name/version, python, `isAssigned`; FL API, `isMidiOutAssigned`, port, name only in the probe profile `LOG_DEVICE_DETAILS`); config summary line; a `wiring:` line (the port rule, see 8); the log survives a missing folder and a failed write (see 8); every native call of the attach path is **announced in klt.log before it is made** so a crash leaves the culprit as the last line on disk; incoming SysEx logged once per distinct message; output counters | `LOG_DEVICE_DETAILS`, `LOG_DEVICE_ID` (`getDeviceID`, off) | gate: `the_init_banner_*`, `if_fl_dies_inside_a_native_call_the_last_line_of_the_log_names_it[6]`, `with_details_off...`, `gate_announces_each_native_query_once...`; lifecycle `incoming_sysex_is_logged_once...` |
 | **O-16** low: unguarded deinit | `OnDeInit` safe when init never ran, when the output is unassigned, twice; goodbye frames waive the burst/LCD-gap limits (hard cap still applies); stock's deinit frame kept byte-exact; optional black-out of pads/select buttons | `SEND_DEINIT_FRAME`, `CLEAR_LEDS_ON_DEINIT` | gate: `deinit_frames_are_byte_identical_to_stock`, `deinit_frame_and_led_clearing_are_switches`, `deinit_with_the_output_unassigned...`; lifecycle `ondeinit_before_any_init...` |
 | **O-17** low: Save LED constant, dead code | `COLOR_MAP` comment labels corrected (bytes untouched). Save LED (`65`) staying lit is stock; lighting it only in Sequencer mode is a switch because the hardware's polarity is unverified. `CountdownReturn` and `COLOR_PLAY_*` are left in place (dead in stock, harmless) | `SAVE_LED_FOLLOWS_MODE` | leds: `save_led_*` |
 | **O-18** low: scroll 1 char / 1.5 s | 500 ms per step | `LCD_SCROLL_MS` | display: `long_names_scroll_every_lcd_scroll_ms`, `stock_scroll_speed_is_a_switch`, `broken_scroll_switch...` |
@@ -85,7 +90,9 @@ init, splash), `_leds.py` (LED semantics, byte identity with stock), `_fuzz.py` 
 | switch | default | meaning |
 |---|---|---|
 | `OUT_ENABLED` | `True` | master kill switch: `False` = the scripts never call `device.midiOutSysex` |
-| `OUT_REQUIRE_MIDIOUT_ASSIGNED` | `True` | also require `device.isMidiOutAssigned()` (undocumented) once `isAssigned()` is true |
+| `OUT_REQUIRE_MIDIOUT_ASSIGNED` | `False` | probe profile: also require `device.isMidiOutAssigned()` (undocumented, crash-warned) once `isAssigned()` is true; only a literal `False` or an exception refuses |
+| `OUT_DEFER_TO_IDLE` | `True` | nothing is asked of FL or sent until the first `OnIdle` tick after `OnInit` (`False` = the welcome frame leaves from `OnInit` as before) |
+| `OUT_DEFER_TIMEOUT_S` | `3.0` | ... unless no `OnIdle` tick arrived this long after `OnInit`: then any callback may send |
 | `OUT_UNASSIGNED_RECHECK_S` | `0.5` | while unassigned, ask FL again at most this often |
 | `OUT_FAIL_BACKOFF_S` | `5.0` | pause after 5 consecutive `midiOutSysex` exceptions |
 | `OUT_MAX_SYSEX_PER_SEC` | `100` | hard cap, any sliding second (a DIN-MIDI-equivalent ~1.4 KB/s; stock sent ~16 KB/s) |
@@ -93,7 +100,10 @@ init, splash), `_leds.py` (LED semantics, byte identity with stock), `_fuzz.py` 
 | `OUT_TICK_S` | `0.02` | one `OnIdle` period |
 | `OUT_LCD_MIN_GAP_S` | `0.035` | minimum spacing of LCD frames (community-tested) |
 | `OUT_LED_PASS_S` | `0.1` | polled-LED evaluation interval |
-| `OUT_TRICKLE_S` | `1.0` | idle keep-alive: one known LED frame per interval (`0` = off) |
+| `OUT_TRICKLE_S` | `1.0` | idle keep-alive: the longest gap between two re-sent known LED frames (`0` = keep-alive off) |
+| `OUT_KEEPALIVE_CYCLE_S` | `3.0` | the whole shadow (about 44 LEDs) is re-asserted within this time: gap = `min(OUT_TRICKLE_S, cycle / LEDs)`; `0` = legacy (one frame per `OUT_TRICKLE_S`, up to 44 s per round) |
+| `OUT_KEEPALIVE_MIN_GAP_S` | `0.05` | the keep-alive never sends faster than 20 frames/s |
+| `OUT_SETTLE_REPAINT_S` | `(0.5, 2.0)` | after a memory switch / full refresh / reconnect: repaint everything again this long after (`()` = off) |
 | `OUT_LCD_KEEPALIVE_S` | `10.0` | LCD keep-alive (`0` = off) |
 | `OUT_HOLD_TIMEOUT_S` | `5.0` | held LEDs are released if `OnIdle` stops advancing the init |
 | `OUT_STATS_LOG_S` | `60.0` | counters line in klt.log when frames were sent (`0` = off) |
@@ -108,8 +118,9 @@ init, splash), `_leds.py` (LED semantics, byte identity with stock), `_fuzz.py` 
 | `GROUP_RELATIVE_CHANNELS` | `True` | `selectedChannel()` instead of stock `channelNumber()` (O-13) |
 | `SEND_DEINIT_FRAME` | `True` | stock's `02 7D 7D 0B 00` at `OnDeInit` (meaning unverified) |
 | `CLEAR_LEDS_ON_DEINIT` | `False` | black out pads/select buttons at `OnDeInit` |
-| `LOG_DEVICE_DETAILS` | `True` | banner also queries `isMidiOutAssigned`/`getPortNumber`/`getName` (only when assigned) |
-| `LOG_DEVICE_ID` | `False` | banner also queries `device.getDeviceID()` (API 25+, unverified on FL 26.1.6) |
+| `LOG_DEVICE_DETAILS` | `False` | probe profile: the banner also queries `general.getVersion`, and (only when assigned) `isMidiOutAssigned`/`getPortNumber`/`getName` |
+| `LOG_DEVICE_ID` | `False` | banner also queries `device.getDeviceID()` (API 25+, unverified on FL 26.1.6; needs `LOG_DEVICE_DETAILS`) |
+| `LOG_RETRY_S` (shared section) | `30.0` | a log path that failed is tried again this often; never given up for good |
 
 A malformed value (a string where a number belongs, `None`) falls back to the default instead of raising
 (`test_output_fuzz.py::broken-values`).
@@ -123,18 +134,20 @@ The tuned scripts therefore make no more native calls than they need, in a fixed
 | when | calls |
 |---|---|
 | import | none |
-| `OnInit` | `general.getVersion()`, `device.isAssigned()`; only if that is `True` and `LOG_DEVICE_DETAILS`: `device.isMidiOutAssigned()`, `device.getPortNumber()`, `device.getName()` (and `device.getDeviceID()` if `LOG_DEVICE_ID`) |
-| before a send | `device.isAssigned()`, then (only if true, `OUT_REQUIRE_MIDIOUT_ASSIGNED`) `device.isMidiOutAssigned()`; then `device.midiOutSysex()` |
+| `OnInit` | `device.isAssigned()` (the documented query, also the first thing Image-Line's MackieCU asks); only with `LOG_DEVICE_DETAILS`: `general.getVersion()`, and if `isAssigned()` is `True` `device.isMidiOutAssigned()`, `device.getPortNumber()`, `device.getName()` (and `device.getDeviceID()` if `LOG_DEVICE_ID`). No `device.midiOutSysex()` from `OnInit`/`OnRefresh` before the first `OnIdle` tick |
+| before a send (first `OnIdle` tick on) | `device.isAssigned()`, then (only if true and `OUT_REQUIRE_MIDIOUT_ASSIGNED`) `device.isMidiOutAssigned()`; then `device.midiOutSysex()` |
 | output unassigned | `device.isAssigned()` at most every `OUT_UNASSIGNED_RECHECK_S`; nothing else |
 | after `OnDeInit` | none |
 
 The output side never calls `device.midiOutMsg`, `processMIDICC`, `dispatch` or any other output API. Each of these calls is
 announced in klt.log **before** it is made (`probe: about to call ...`, `gate: about to call ...`), one line at a time,
 opened and closed per line, so if FL dies inside one the **last line of klt.log names it** (tested with an emulated crash in each).
-If instead the log says `isAssigned() is True but isMidiOutAssigned() is False` while the output is assigned in FL, that undocumented
-query does not mean what its name suggests: set `OUT_REQUIRE_MIDIOUT_ASSIGNED = False`.
-To bisect on tom: read the last line; then reduce the exposure with `LOG_DEVICE_DETAILS = False` and
-`OUT_REQUIRE_MIDIOUT_ASSIGNED = False` (only `isAssigned` remains), and `OUT_ENABLED = False` (no `midiOutSysex` at all).
+If instead the log says `isAssigned() is True but isMidiOutAssigned() is False` while the output is assigned in FL (only possible in
+the probe profile), that undocumented query does not mean what its name suggests: set `OUT_REQUIRE_MIDIOUT_ASSIGNED = False`.
+**The default is the minimal profile**: `device.isAssigned()` is the only native query, nothing is sent from `OnInit`. To bisect on
+tom: read the last line; if it still names `isAssigned`, `OUT_ENABLED = False` (no `midiOutSysex` at all) tells whether the sends
+are the problem; the richer calls (`general.getVersion`, `isMidiOutAssigned`, `getPortNumber`, `getName`, `getDeviceID`) are
+added back one profile switch at a time, after the first attach has worked (`LOG_DEVICE_DETAILS`, `OUT_REQUIRE_MIDIOUT_ASSIGNED`, `LOG_DEVICE_ID`).
 
 ## 5. Behaviour differences against stock (diffreplay)
 
@@ -159,7 +172,8 @@ set of (LED id, value) is a subset of stock's.
 ## 6. Not done, unverified, or left to the other side
 
 * **Hardware unknowns stay switches with stock defaults**: pad LED orientation (O-10), Save LED polarity (O-17), the noisy
-  refresh flags (O-07), the deinit frame (`SEND_DEINIT_FRAME`), whether `isMidiOutAssigned` is safe to call.
+  refresh flags (O-07), the deinit frame (`SEND_DEINIT_FRAME`), whether `isMidiOutAssigned` is safe to call (off by default
+  since review round 1).
 * **O-09 residual**: with `FORWARD_USE_PROCESSOR = True` the Forward script runs the DAW processor from its own callbacks;
   LCD pages that produces leave through the Forward script's output, and in a single-interpreter FL they would share this
   module's shadow state. Off by default. If FL runs the scripts in separate interpreters each gets its own copy of the output
@@ -182,3 +196,64 @@ uv run --python 3.12 python -m tests.flsim.diffreplay "$KL_STOCK_DIR" "scripts/K
 ```
 
 `--stock` skips the `test_output_*` tests (they exercise tuned-only features).
+
+## 8. Review round 1 (host safety, hardware fidelity, guide acceptance)
+
+Nine confirmed findings of the first adversarial review were applied to the tuned scripts. Everything below is still simulator-only:
+nothing has run in FL 26.1.6 or on the keyboard. Tests: `tests/test_review_fix_gate.py`, `_log.py`, `_paint.py`, `_unmapped.py`
+(new); the existing tests that pinned the old defaults now switch the old behaviour on explicitly and say so.
+
+| review id | severity | what was wrong | decision | switch(es) | test(s) |
+|---|---|---|---|---|---|
+| **R-HS-02**, **RA-10** | low | `isMidiOutAssigned()` (stub: "not officially documented ... causes FL Studio to crash"; no Image-Line script calls it) was on by default in the gate and the banner, along with `getPortNumber`, `getName` and `general.getVersion`, all inside `OnInit`; a falsy answer (`0`, `None`) darkened the keyboard for good; the first `midiOutSysex` also left from inside `OnInit`, the callback the tom probe died in | The **minimal profile is the default**: `device.isAssigned()` is the only native query. The richer calls are the opt-in **probe profile** (`LOG_DEVICE_DETAILS`, `OUT_REQUIRE_MIDIOUT_ASSIGNED`, `LOG_DEVICE_ID`). When the requirement is on, only a literal `False` or an exception refuses (finding's proposal). Frames asked for in `OnInit`/`OnRefresh` wait in the queue and leave from the first `OnIdle` tick, **bounded by `OUT_DEFER_TIMEOUT_S`** (3 s): a script whose `OnIdle` never runs sends from its other callbacks as before, so the deferral cannot make the keyboard dark for good (the finding did not consider that case; an existing test pins it) | `OUT_REQUIRE_MIDIOUT_ASSIGNED` (now `False`), `LOG_DEVICE_DETAILS` (now `False`), `OUT_DEFER_TO_IDLE`, `OUT_DEFER_TIMEOUT_S` | gate: `default_asks_fl_only_for_isassigned_and_sends`, `oninit_makes_exactly_one_device_call`, `no_sysex_leaves_from_inside_oninit_or_onrefresh`, `whatever_fl_answers_to_ismidioutassigned...`, `when_required_only_a_literal_false_refuses`, `probe_profile_restores...`, defer timeout tests; the reviewer's `test_c_ra10*` (now plain asserts) |
+| **R-HS-03** | low | `KLTLog` latched `_dead` for good on the first failed write (folder missing, sharing violation), silently: the crash breadcrumbs could vanish | On the first failure the folder is created (`os.makedirs`); failing that, lines go to `<temp>/klt.log`, then `<script folder>/klt.log`; a path that failed is retried after `LOG_RETRY_S`; the fallback in use and a total failure are each printed once to FL's Script output; `OnInit` starts with a clean slate (`KLTLog.retry_now()`). Nothing raises, and while every path fails only one attempt per 30 s is made | `LOG_RETRY_S` | `test_review_fix_log.py`; `test_klt_shared::test_log_never_raises...` (adapted); the reviewer's `test_c_ra03_the_log_is_written_even_if_its_folder_did_not_exist` (now a plain assert). `tools/probe/device_KLProbe.py` has the same silent-failure `_log` and was not touched (see below) |
+| **R-HS-04**, **OUT-2** | low | pads and Play/Stop/Record LEDs were painted only from `OnRefresh`, which FL may not send after `OnInit`; the default `INIT_ANIMATION = 0` removed the stock animation's incidental pad writes | When the init sequence reaches `done`, `KLTReturn.take_paint()` asks the entry script for one paint of pads and transport LEDs (`_paint_after_init`, from `OnIdle`). The LCD text (`Sync`) is not part of it (set in `OnInit`). Identical frames are de-duplicated, so a FL that does send the refresh costs nothing extra (test) | (none) | `test_review_fix_paint.py`: `pads_and_transport_leds_are_painted_when_fl_never_sends_an_onrefresh`, `..._costs_nothing_when_fl_does_send_the_refresh`, late-output and once-only tests |
+| **OUT-1** | low | the keep-alive re-sent one frame per second round-robin: an unannounced device-side LED reset (DAW/User/Analog Lab button, power cycle) took up to 43 s to heal, stock healed the polled LEDs in 20 ms | The gap is `min(OUT_TRICKLE_S, OUT_KEEPALIVE_CYCLE_S / LEDs)` but never below `OUT_KEEPALIVE_MIN_GAP_S`: the whole shadow is re-asserted within 3 s at about 15 frames/s (stock 1,200/s, hard cap 100/s), the remainder of a tick is carried so the cycle is really 3 s, not 3.5 s. Settle repaints: after a memory switch, a full-refresh request and a reconnect everything is sent again at +0.5 s and +2 s (a new event restarts the schedule; no LCD `Sync`, so the settle repaint does not query FL for text). **Not** scheduled after `OnInit`: the initial paint plus the 3 s cycle cover it, and that keeps the first seconds after attach quiet. `OUT_TRICKLE_S = 0` still switches the whole keep-alive off; `OUT_KEEPALIVE_CYCLE_S = 0` restores the old one-per-second trickle | `OUT_KEEPALIVE_CYCLE_S`, `OUT_KEEPALIVE_MIN_GAP_S`, `OUT_SETTLE_REPAINT_S` | paint: `every_led_is_re_asserted_within_the_keep_alive_cycle`, `keep_alive_rate_is_bounded...`, `keep_alive_frames_change_nothing`, `cycle_is_a_switch...`, settle tests (memory switch, full refresh, switch, no repeat, restart, cap); `test_output_budget::test_a_quiet_idle_loop_only_sends_the_keep_alive` (adapted: was 1 frame/s) |
+| **R-HS-05** | low | `isAssigned()` proves "some output is linked by port number", not that it is the DAW output; with the live tom config (main output port 0, input port 1, MIDIOUT2 not enabled) a wrong-port silent dark state is plausible and nothing in the API can detect it | No script-side detection exists: the banner and the O-01 message state the wiring rule, `klt.log` gets a `wiring:` line at every `OnInit`, the first-frame line says "handed to FL ... FL does not confirm delivery" (not "delivered"), and the LCD greeting is the acceptance test. The numeric port is named in the probe profile (`getPortNumber` is not asked by default: a conflict with RA-10 that the safer behaviour wins) and, with no native call at all, in a second `wiring:` line the DAW script writes when its first event arrives (`FlMidiMsg.port`), once per `OnInit`. Settings table below | (none) | gate: `log_states_the_port_rule_at_every_init`, `with_details_on_the_wiring_line_names_the_numeric_port`, `unassigned_message_states_the_port_rule`, `a_true_gate_is_not_described_as_the_output_working` |
+
+### Port and output settings (what the guide asks for, and what the tuned scripts can and cannot check)
+
+FL: Options > MIDI settings (guide p.4 Fig.2, `docs/analysis/01` 1.3). **The numbers must be set by hand.** FL lists a script of the
+user folder as its `# name=` plus ` (user)`.
+
+| device | Input: controller type | Input: port | Output: port | script |
+|---|---|---|---|---|
+| `MIDIIN2 (KeyLab mkII 88)` / `MIDIOUT2 (KeyLab mkII 88)` (the DAW port: enable both) | `KeyLab mkII (tuned) (user)` | **0** | **0** (same as its input) | `device_KeyLabmk2Tuned.py`: buttons, jog, encoders, faders, all LEDs and the LCD |
+| `KeyLab mkII 88` (the main port) | `Forward CCs Port 10 KEYLAB MKII (tuned) (user)` | **1** | **1**, or the output disabled | `device_ForwardCCsPort10KeyLabMk2Tuned.py`: keybed, wheels, pads, Analog Lab CCs |
+
+Rules: the DAW script's **output port number must equal its input port number** (that is what links them); **no other MIDI output may
+use that number** (on tom the main `KeyLab mkII 88` output was found on port 0 with its input on 1: if the DAW input is set to 0 while
+that output still carries 0, `isAssigned()` is `True`, `midiOutSysex` succeeds and the keyboard's DAW port receives nothing). FL's
+behaviour with two outputs on one port number is UNVERIFIED. The scripts cannot tell: `isAssigned()` is `True` in every one of these
+cases. **Acceptance test: the greeting `KeyLab mkII` / `tuned v0.1.0` on the keyboard LCD within a second of attaching.** A dark keyboard with
+`device.isAssigned=True` in `klt.log` is a wiring problem until proven otherwise; the numeric port needs `LOG_DEVICE_DETAILS = True`.
+
+### Not done / for the next hardware session
+
+* **Settle repaint after `OnInit`** (the review's example list included it): not done, see OUT-1.
+* **`tools/probe`**: `device_KLProbe.py`/`device_KLBisect.py` swallow every logging exception, exactly as `KLTLog` did. Before trusting
+  "the probe crashed before it logged anything" (docs/incidents) check on tom that `C:\ProgramData\DeLoMIDI` exists, that the FL user
+  can create files in it, and whether `probe.log` / `bisect.log` exist. The probe's first native calls were `device.getPortNumber()` and
+  `device.getName()` (`_who()`), then `general.getVersion`, `isAssigned`, `isMidiOutAssigned`, `getDeviceID` and a `midiOutSysex`, all in
+  `OnInit`; the tuned default makes none of them except `isAssigned`. Not edited here (outside the scripts folder).
+* The one-shot diagnostics (`PROBE` samples, `PROBE-VERDICT`, `UNMAPPED` first-seen) still survive `OnDeInit`/`OnInit` (review RA-03, second
+  half; not among the findings applied): a Reload does not re-capture them.
+
+## Hardware finding H-FL-IO (measured on FL Studio 26.1.6, 2026-09-30)
+
+FL's embedded Python 3.12.1 cannot `open()` any file: even reading `C:\Windows\win.ini` raises
+`SystemError: <class '_io.FileIO'> returned NULL without setting an exception`. `print()` and `os.listdir()` work.
+Consequences and changes:
+
+- `klt.log` (and the probe scripts' logs) can never be written on this FL build. This is why no log file appeared after the
+  first attach: it was not evidence that the script died before logging.
+- `KLTLog` keeps the newest `LOG_RING_LINES` lines in memory (`KLTLog.dump(n)`, `KLTLog.status()`), detects the restriction
+  once (a `SystemError` from `open()` is a property of the interpreter, not of a path) and stops retrying files for the
+  session, and prints lines to the Script output while the file log is unavailable (`LOG_TO_CONSOLE = 'auto'`, capped by
+  `LOG_CONSOLE_MAX_LINES_PER_SEC`). `retry_now()` (called from OnInit) gives a newer FL one fresh attempt.
+- Read the log on tom from View > Script output > the script's tab, command box:
+  `print('\n'.join(__import__('KLTLog').dump(60)))`
+- Tests: `tests/test_klt_console.py` (models the SystemError, includes a hygiene test that nothing but KLTLog touches files).
+- Also measured: `device.isAssigned()` is False during OnInit when the script is attached before its port number is set, and
+  True once the port is set; FL does not call OnInit again. The output layer re-checks at runtime and recovered on its own
+  (194 frames sent, 0 errors).

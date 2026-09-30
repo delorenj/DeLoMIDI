@@ -237,6 +237,7 @@ def test_unassigned_output_is_never_written_to(make_rig, crash_mode):
 def test_the_output_assignment_is_checked_before_the_first_sysex(make_rig):
     rig = make_rig(boot=False)
     rig.scripts.boot(order=BOOT_ORDER)
+    rig.idle(1.0)                                    # review RA-10: the tuned scripts send from the first OnIdle tick, not from OnInit
     calls = rig.host.api_calls()
     first_send = next(i for i, c in enumerate(calls) if c.qual == "device.midiOutSysex")
     assert any(c.qual in ("device.isAssigned", "device.isMidiOutAssigned") for c in calls[:first_send]), \

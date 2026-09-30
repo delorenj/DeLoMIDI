@@ -130,6 +130,7 @@ class KeyLabLightReturn:
         self._init_frames = []
         self._init_pos = 0
         self._pad_mode = None            # KLT O-07: (SEQ_MODE, bank, loop mode) the pads were last painted for
+        self._paint_due = False          # KLT O-12: the init sequence just finished: pads and transport LEDs must be painted once
 
     def init(self) :
         # KLT O-12: stock blocked FL's main thread here for 2.92 s (240 SysEx interleaved with time.sleep) and did it
@@ -147,6 +148,7 @@ class KeyLabLightReturn:
         self._init_frames = _animation_frames(level)
         self._init_pos = 0
         self._init_stage = 'wait'
+        self._paint_due = False
         hold_leds(True)
 
     # KLT O-12: True while the staged init is finished (or was never armed)
@@ -179,10 +181,19 @@ class KeyLabLightReturn:
                 sent += 1
             if self._init_pos >= len(self._init_frames):
                 self._init_stage = 'done'
+                self._paint_due = True          # KLT O-12: pads/transport only follow OnRefresh, which FL may not send after OnInit
                 hold_leds(False)
                 KLTLog.log('init: sequence complete')
                 return True
         return False
+
+    # KLT O-12: pads and transport LEDs are painted once when the init sequence is done (no OnRefresh needed)
+    def take_paint(self):
+        """KLT O-12: True once after the init sequence finished: the caller paints the pads and the Play/Stop/Record LEDs.
+        Stock (and the tuned scripts before) painted them only from OnRefresh, so a FL that sends none after OnInit left them
+        dark: the animation's incidental pad writes were the only other thing that lit them."""
+        f, self._paint_due = self._paint_due, False
+        return f
 
     # KLT O-07: the pads only followed OnRefresh; a mode change repaints them by itself
     def PadModeChanged(self):

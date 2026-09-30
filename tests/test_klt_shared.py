@@ -28,13 +28,22 @@ def test_log_appends_timestamped_lines_and_never_touches_the_fl_api(host, klt):
 
 
 def test_log_never_raises_when_the_path_is_unusable(host, klt):
-    host.set_config(LOG_PATH=os.path.join(host.tmpdir, "no", "such", "dir", "klt.log"))
+    """Review R-HS-03: an unusable path is no longer fatal for good. The path's parent here is a regular file, so its folder
+    can never be created; lines go to the temp-folder fallback (private to the test, see conftest) and the original is only
+    retried after LOG_RETRY_S."""
+    blocker = os.path.join(host.tmpdir, "blocker")
+    with open(blocker, "w") as f:
+        f.write("x")
+    host.set_config(LOG_PATH=os.path.join(blocker, "no", "such", "dir", "klt.log"))
     klt.log("x")
     klt.log_once("k", "y")
     klt.exception("where")
     host.set_config(LOG_PATH=host.log_path)
-    klt.log("after")                                              # once dead, stays quiet instead of retrying forever
+    klt.log("after")                                              # inside the back-off: still on the fallback
     assert host.read_log() == ""
+    host.advance(31)
+    klt.log("later")                                              # the path works again after LOG_RETRY_S
+    assert "later" in host.read_log()
 
 
 def test_log_can_be_switched_off(host, klt):

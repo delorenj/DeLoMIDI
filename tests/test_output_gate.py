@@ -105,7 +105,9 @@ def _patch_ismidioutassigned(value=None, exc=None):
 
 
 def test_a_false_ismidioutassigned_blocks_sending_even_when_isassigned_is_true(make_rig):
+    """The probe profile (review R-HS-02): OUT_REQUIRE_MIDIOUT_ASSIGNED is opt-in since round 1."""
     rig = make_rig(boot=False)
+    rig.host.set_config(OUT_REQUIRE_MIDIOUT_ASSIGNED=True)
     _patch_ismidioutassigned(False)
     rig.scripts.boot(order=("forward", "entry"))
     rig.idle(3.0)
@@ -145,6 +147,7 @@ def test_a_missing_ismidioutassigned_falls_back_to_isassigned(make_rig):
 @pytest.mark.parametrize("query", ["device.isAssigned", "device.isMidiOutAssigned"])
 def test_a_query_that_raises_means_not_assigned(make_rig, query):
     rig = make_rig(boot=False)
+    rig.host.set_config(OUT_REQUIRE_MIDIOUT_ASSIGNED=True)         # the probe profile asks isMidiOutAssigned too
     rig.host.inject_fault(query, RuntimeError)
     rig.scripts.boot(order=("forward", "entry"))
     rig.idle(3.0)
@@ -287,7 +290,7 @@ def test_deinit_with_the_output_unassigned_sends_nothing(make_rig):
 # ================================================================================================ the init banner (O-15)
 
 def test_the_init_banner_says_what_fl_did(make_rig):
-    rig = boot(make_rig)
+    rig = boot(make_rig, cfg={"LOG_DEVICE_DETAILS": True})          # the probe profile; the default banner: test_review_fix_gate.py
     lines = log_lines(rig.host, "KeyLab mkII (tuned) v")
     assert len(lines) == 1
     line = lines[0]
@@ -308,6 +311,7 @@ def test_the_banner_without_an_output_says_so_and_asks_nothing_else(make_rig):
 
 def test_the_banner_warns_about_port_10(make_rig):
     rig = make_rig(boot=False)
+    rig.host.set_config(LOG_DEVICE_DETAILS=True)                    # the port number is only asked in the probe profile
     rig.host.port_numbers["entry"] = 10
     rig.scripts.boot(order=("forward", "entry"))
     assert any("port 10" in l and "Analog Lab" in l for l in log_lines(rig.host, "WARNING"))
@@ -319,7 +323,7 @@ def test_the_device_id_is_not_asked_by_default(make_rig):
 
 
 def test_the_device_id_is_logged_on_request(make_rig):
-    rig = boot(make_rig, cfg={"LOG_DEVICE_ID": True})
+    rig = boot(make_rig, cfg={"LOG_DEVICE_ID": True, "LOG_DEVICE_DETAILS": True})
     assert rig.host.calls_to("device.getDeviceID") != [] and any("deviceID=" in l for l in log_lines(rig.host))
 
 
@@ -345,9 +349,11 @@ def test_if_fl_dies_inside_a_native_call_the_last_line_of_the_log_names_it(make_
     in klt.log first (append + close per line), so a crash leaves the culprit as the last line on disk."""
     from tests.flsim.host import FLCrash
     rig = make_rig(boot=False)
+    rig.host.set_config(LOG_DEVICE_DETAILS=True, OUT_REQUIRE_MIDIOUT_ASSIGNED=True)      # the probe profile reaches every call
     rig.host.inject_fault(call, FLCrash("boom", call))
     with pytest.raises(FLCrash):
         rig.scripts.boot(order=("forward", "entry"))
+        rig.idle(1.0)                                # the first frame leaves from the first OnIdle tick (review RA-10)
     assert needle in log_lines(rig.host)[-1], log_lines(rig.host)[-3:]
 
 
@@ -361,7 +367,7 @@ def test_with_details_off_and_no_midiout_requirement_isassigned_is_the_only_quer
 
 
 def test_the_gate_announces_each_native_query_once_per_oninit(make_rig):
-    rig = boot(make_rig)
+    rig = boot(make_rig, cfg={"OUT_REQUIRE_MIDIOUT_ASSIGNED": True})
     rig.settle(2.0)
     assert len(log_lines(rig.host, "gate: about to call device.isAssigned()")) == 1
     assert len(log_lines(rig.host, "gate: about to call device.isMidiOutAssigned()")) == 1
@@ -370,8 +376,10 @@ def test_the_gate_announces_each_native_query_once_per_oninit(make_rig):
 
 def test_the_message_names_the_switch_when_isMidiOutAssigned_is_what_says_no(make_rig):
     rig = make_rig(boot=False)
+    rig.host.set_config(OUT_REQUIRE_MIDIOUT_ASSIGNED=True)
     _patch_ismidioutassigned(False)
     rig.scripts.boot(order=("forward", "entry"))
+    rig.idle(0.1)                                    # the gate is first asked at the first OnIdle tick (review RA-10)
     (msg,) = log_lines(rig.host, "no MIDI output for this script")
     assert "OUT_REQUIRE_MIDIOUT_ASSIGNED = False" in msg
     assert "OUT_REQUIRE_MIDIOUT_ASSIGNED" not in "".join(log_lines(rig.host, "isAssigned() is False"))

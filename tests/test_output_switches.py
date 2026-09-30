@@ -1,7 +1,7 @@
 """Housekeeping of the output-side KLTConfig switches: none is dead, none is undocumented, none is untested.
 
 The switches of the '--- output side' section of KLTConfig.py must each (1) be used by a script of the folder, (2) be
-described in docs/tuned/CHANGES-output.md and (3) be exercised by at least one tests/test_output_*.py test."""
+described in docs/tuned/CHANGES-output.md and (3) be exercised by at least one tests/test_output_*.py (or review-round tests/test_review_fix_*.py) test."""
 from __future__ import annotations
 
 import re
@@ -43,6 +43,7 @@ def test_every_output_switch_is_documented(target):
 
 def test_every_output_switch_is_exercised_by_a_test(target):
     here = Path(__file__).resolve()
-    tests = "\n".join(p.read_text(encoding="utf-8") for p in here.parent.glob("test_output_*.py") if p != here)
+    tests = "\n".join(p.read_text(encoding="utf-8") for pattern in ("test_output_*.py", "test_review_fix_*.py")
+                      for p in here.parent.glob(pattern) if p != here)
     untested = [n for n in _output_switches(target) if not re.search(r"\b%s\b" % n, tests)]
     assert untested == [], "switches no tests/test_output_*.py test touches: %s" % untested

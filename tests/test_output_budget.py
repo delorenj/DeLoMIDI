@@ -91,13 +91,19 @@ def test_budgets_change_when_the_keyboard_is_told_never_what_it_ends_up_showing(
 # ================================================================================================ shadow state
 
 def test_a_quiet_idle_loop_only_sends_the_keep_alive(rig):
+    """Review OUT-1: the keep-alive re-asserts the whole shadow within OUT_KEEPALIVE_CYCLE_S (3 s), so about 15 frames/s at
+    idle (was 1/s); every one of them is a frame the keyboard already shows, and the rate is capped."""
     rig.settle(3.0)
     h = rig.host
     t0 = h.clock.now
+    m0 = h.mark()
+    before = h.device_model().state()
     rig.driver.run(30, playback=False)
     per = per_second(h, t0, 30)
-    assert sum(per) <= 40, "quiet idle sent %d frames in 30 s" % sum(per)
-    assert max(per) <= 2
+    assert sum(per) <= 30 * 20 + 30, "quiet idle sent %d frames in 30 s" % sum(per)      # OUT_KEEPALIVE_MIN_GAP_S = 0.05
+    assert max(per) <= 20
+    assert h.device_model().state() == before, "a keep-alive frame changed what the keyboard shows"
+    assert len(h.since(m0).sysex) == sum(per)
 
 
 def test_without_keep_alive_a_quiet_idle_loop_sends_nothing_at_all(make_rig):
@@ -110,7 +116,7 @@ def test_without_keep_alive_a_quiet_idle_loop_sends_nothing_at_all(make_rig):
 
 
 def test_the_keep_alive_re_sends_one_known_frame_at_a_time_and_covers_them_all(make_rig):
-    rig = boot(make_rig, cfg={"OUT_TRICKLE_S": 0.25, "OUT_LCD_KEEPALIVE_S": 5.0})
+    rig = boot(make_rig, cfg={"OUT_TRICKLE_S": 0.25, "OUT_LCD_KEEPALIVE_S": 5.0, "OUT_KEEPALIVE_CYCLE_S": 0})   # legacy trickle
     rig.settle(4.0)
     h = rig.host
     keys_known = {(f.kind, f.fields["id"]) for f in sent(h) if f.kind in ("led_mono", "led_rgb")}
@@ -123,7 +129,8 @@ def test_the_keep_alive_re_sends_one_known_frame_at_a_time_and_covers_them_all(m
     assert max(per) <= 5                                              # 4/s trickle + the odd LCD frame
 
 
-def test_only_changed_leds_are_sent(rig):
+def test_only_changed_leds_are_sent(make_rig):
+    rig = boot(make_rig, cfg={"OUT_TRICKLE_S": 0, "OUT_LCD_KEEPALIVE_S": 0})       # this test is about de-duplication, not the keep-alive
     rig.settle(3.0)
     rig.state.muted_channels.add(2)
     rig.refresh()

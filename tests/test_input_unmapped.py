@@ -3,7 +3,11 @@
 Stock set event.handled = True before it looked at the table, so every unmapped note / CC / fader event on channel 1
 was swallowed without a trace. The tuned scripts log it (KLTLog, KLTConfig.LOG_UNMAPPED) and, per
 KLTConfig.PASS_UNMAPPED, hand it back to FL. The hardware's real DAW preset is unverified (docs/analysis/02, F-03):
-these logs are how the first run on the keyboard finds out what it sends."""
+these logs are how the first run on the keyboard finds out what it sends.
+
+Review round 1 (RA-01): the DEFAULT of PASS_UNMAPPED is now False on the DAW port (a panel button nobody claims is not a
+note for the selected channel), so the tests that pin "passed on to FL" switch it on explicitly; the new default is pinned in
+tests/test_review_fix_unmapped.py."""
 from __future__ import annotations
 
 import pytest
@@ -45,6 +49,7 @@ def test_unmapped_events_never_reach_a_handler(rig):
 @pytest.mark.tuned_fix("F-03")
 @pytest.mark.parametrize("note", UNMAPPED_NOTES)
 def test_unmapped_button_ids_are_passed_on_to_fl(rig, note):
+    rig.host.set_config(PASS_UNMAPPED=True)              # RA-01: no longer the default
     for status, vel in ((0x90, 127), (0x90, 0), (0x80, 64)):
         a = rig.midi(status, note, vel)
         assert a.handled is False, (hex(status), note)
@@ -54,6 +59,7 @@ def test_unmapped_button_ids_are_passed_on_to_fl(rig, note):
 @pytest.mark.tuned_fix("F-03")
 @pytest.mark.parametrize("cc", UNMAPPED_CCS)
 def test_unmapped_ccs_are_passed_on_to_fl(rig, cc):
+    rig.host.set_config(PASS_UNMAPPED=True)              # RA-01: no longer the default
     a = rig.cc(cc, 64)
     assert a.handled is False and a.event.data1 == cc and a.event.data2 == 64
 
@@ -61,6 +67,7 @@ def test_unmapped_ccs_are_passed_on_to_fl(rig, cc):
 @pytest.mark.tuned_fix("F-03")
 @pytest.mark.parametrize("status", [0xE9, 0xEA, 0xEF])
 def test_pitch_bend_beyond_the_nine_faders_is_passed_on(rig, status):
+    rig.host.set_config(PASS_UNMAPPED=True)              # RA-01: no longer the default
     assert rig.midi(status, 5, 100).handled is False
 
 
@@ -68,6 +75,7 @@ def test_pitch_bend_beyond_the_nine_faders_is_passed_on(rig, status):
 def test_unmapped_events_are_logged_once_per_distinct_id(rig, target):
     tuned_only(target)
     fresh_second(rig)
+    rig.host.set_config(PASS_UNMAPPED=True)              # RA-01: the line says what really happens; this test pins "passed to FL"
     for _ in range(5):
         rig.button(104, True)
     rig.button(112, True)

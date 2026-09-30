@@ -32,7 +32,7 @@ Arturia's file carries a `# KLT <finding-id>: why` comment (checked by `tests/te
 |---|---|---|---|
 | **F-01** (high) Forward script ran the full processor from `OnMidiIn` | The Forward script's default path is raw `status/data1/data2` filtering in `OnMidiIn`: V Collection CC + pitch-bend forwarding, pads, CC1/28/29. Keybed traffic makes no FL call at all. The DAW command processor on the keyboard port is opt-in and runs from `OnMidiMsg`, for chosen kinds only. `ProcessEvent` dispatches on the raw status, so H1/H2 cannot matter. Full PROBE/RAW logging (below) | `FORWARD_USE_PROCESSOR` (False), `FORWARD_PROCESSOR_KINDS` (`('cc',)`; `'note'` is the H1 footgun), `FORWARD_PADS` (True), `FORWARD_PLUGIN_CCS` (True), `FORWARD_TARGET_PORT` (10), `FORWARD_MODE` (2), `PROBE_MIDI_FIELDS` (True), `PROBE_SAMPLES_PER_KIND` (3), shared `LOG_RAW_EVENTS` (False) | tf: `test_forward.py` (keybed/held keys under H1), `test_input_forward.py` (keybed, pads, CCs, processor path, fault injection), `test_input_hardening.py::test_the_processor_dispatches_on_the_raw_status_not_on_midiid`, `test_a_random_sweep_of_input_events...`; `test_input_probe.py` |
 | **F-02** (high) Analog Lab CC handlers bound with the wrong signature | `_plugin_dispatcher`, `OnPluginEvent`'s table and the unreachable `status 176` entry are gone. `handle_keyboard_cc()` (raw fields): CC28/29 = previous/next preset of the focused plugin (press only), CC1 = mod wheel -> the plugin database row, absolute (stock treated its value as a relative tick count, and in mixer mode computed track -14). The 17 Analog Lab CCs are logged as unmapped and passed to FL. Optional translation of them into the database (knob i -> encoder i, fader j -> fader j, absolute). LCD label check `clef != 1` (stock tested the pitch-bend LSB) | `ANALOG_LAB_CC_TO_PLUGIN_DB` (False: a guess, needs the hardware) | tf: `test_forward.py::test_analog_lab_ccs_never_raise_on_the_keyboard_port`, `::test_mod_wheel_never_reaches_a_mixer_track_pan_with_a_negative_index`, `test_input_forward.py` (17 CCs x 3 plugins, mod wheel absolute, translation table, V Collection precedence), `test_fuzz.py` |
-| **F-03** (high) unmapped events swallowed silently | `_consume()`: an event is consumed only if a handler exists for it (a mapped control's ignored phase stays consumed). Unmapped ones are logged once per distinct (port, status, data1), again at x10/x100/x1000, and passed to FL. A note-off is never swallowed | `PASS_UNMAPPED` (True), `LOG_UNMAPPED` (True), `LOG_UNMAPPED_MAX_KEYS` (300) | tf: `test_input_unmapped.py` (ids 32..112, 9 CCs, pitch bend ch10+, log once/x10/x100, bounded, off, `PASS_UNMAPPED=False` = stock) |
+| **F-03** (high) unmapped events swallowed silently | `_consume()`: an event is consumed only if a handler exists for it (a mapped control's ignored phase stays consumed). Unmapped ones are logged once per distinct (port, status, data1), again at x10/x100/x1000, with what really happens to them (`swallowed` / `passed to FL`). What happens is **per port since review round 1 (RA-01, RA-04)**: on the DAW port `PASS_UNMAPPED` decides, default **False** = stock (swallowed; a panel button nobody claims must not be a note on the selected channel); on the keyboard port (the Forward script's processor path) an unmapped event is never swallowed. A note-off is never swallowed | `PASS_UNMAPPED` (**False**, DAW port only), `LOG_UNMAPPED` (True), `LOG_UNMAPPED_MAX_KEYS` (300) | tf: `test_input_unmapped.py` (ids 32..112, 9 CCs, pitch bend ch10+, with `PASS_UNMAPPED=True`; log once/x10/x100, bounded, off, `PASS_UNMAPPED=False` = stock); `test_review_fix_unmapped.py` (the default, per port) |
 | **F-04** (high) song-mode pad release ignored, `EDIT_MODE` stuck | The release is always routed in Sequencer mode (`release_bit`); the step toggle stays pattern-mode only. Held-pad state is cleared on every Save toggle, and a release whose press was forgotten does nothing | - | tf: `test_pads.py` (2), `test_input_hardening.py` (song-mode state, forgotten press) |
 | **F-05** (high) pad velocity clobbered with 144/128 | Both `event.data2 = ...` lines deleted; only `data1` is remapped | - | tf: `test_pads.py::test_drum_pad_velocity_is_preserved`, `::test_a_range_checked_event_does_not_raise_on_pads`, `test_fuzz.py`, `test_input_forward.py` (keyboard port) |
 | **F-06** `FPC_MAP.get()` -> `None` | Notes outside 36..51 are left alone in drum mode and are not step buttons in Sequencer mode (not consumed, no `processMIDICC`); `hold_bit`/`release_bit` range-guarded | - | tf: `test_pads.py` (2), `test_input_hardening.py::test_notes_outside_the_pad_range_are_not_step_buttons`, `test_fuzz.py` |
@@ -77,7 +77,7 @@ switch is read at event time, so `host.set_config(...)` in a test or a Reload in
 
 | Switch | Default | Stock-equivalent | Meaning |
 |---|---|---|---|
-| `PASS_UNMAPPED` | True | False | unmapped ch1 note/CC/fader events go on to FL (a phantom note on the selected channel is the price when the DAW port carries MCU-style buttons such as fader touch 104..112 or encoder pushes 32..39: set False if `UNMAPPED` lines show that) |
+| `PASS_UNMAPPED` | False | False | **DAW port only.** False = an unmapped ch1 note/CC/fader event is swallowed like stock (a panel button nobody claims - Next/Previous with Bank off, Category, Preset, the 9th Select button, fader touch, encoder pushes - would otherwise be a note on the selected channel). True = it goes on to FL (`UNMAPPED` lines then name what FL received). The keyboard port never swallows an unmapped event, whatever this says |
 | `LOG_UNMAPPED`, `LOG_UNMAPPED_MAX_KEYS` | True, 300 | - | log each distinct unmapped id once |
 | `PROBE_MIDI_FIELDS`, `PROBE_SAMPLES_PER_KIND` | True, 3 | - | PROBE / PROBE-VERDICT lines |
 | `FORWARD_USE_PROCESSOR`, `FORWARD_PROCESSOR_KINDS` | False, `('cc',)` | True for everything | DAW command table on the keyboard port |
@@ -135,9 +135,9 @@ Every differing group of the isolated run maps to a finding:
 
 | Group (op class) | What differs | Finding |
 |---|---|---|
-| ids nobody maps (note-on ch1, 799 ops) | `handled True -> False` | F-03 |
-| other CCs on the DAW port (343) | `handled True -> False` | F-03 |
-| pitch bend on ch10..16 (24) | `handled True -> False` | F-03 |
+| ids nobody maps (note-on ch1, 799 ops) | `handled True -> False` | F-03 (until review round 1: now swallowed like stock, the group is gone) |
+| other CCs on the DAW port (343) | `handled True -> False` | F-03 (as above) |
+| pitch bend on ch10..16 (24) | `handled True -> False` | F-03 (as above) |
 | note-off 0x80 of mapped ids (~250 `handled False -> True`, release handlers firing) | routed and consumed | F-23 |
 | pads (1,393 ops) | `data2` no longer 144/128, `event-range` violations gone; remap only for FPC | F-05, F-07 |
 | pads (83 `True -> False`, 68 `False -> True`, `processMIDICC`, `setGridBit` differences) | notes outside 36..51 pass; song-mode release consumed; a release without a held press does not toggle | F-06, F-04 |
@@ -174,10 +174,25 @@ releases F-23, mode following focus F-12, Save clearing pad state F-04, lone pad
 * Which DAW preset the keyboard is in, which port carries which control, real note numbers, release form, encoder value
   encoding, and whether `midiId` is populated in `OnMidiIn` are all UNVERIFIED. The scripts log them; none is assumed
   beyond Arturia's own contract (docs/analysis/02 section 2).
-* `PASS_UNMAPPED = True` passes ids the DAW port may use for MCU-style buttons on to FL as notes.
+* `PASS_UNMAPPED = False` (the default since review round 1) means an id the DAW port sends that the scripts do not know is dropped, as in
+  stock; the `UNMAPPED` lines in `klt.log` name each one, which is how a real button gets a handler later. If the DAW script is
+  wired to the keyboard port by mistake (wrong FL settings), unmapped keybed notes on channel 1 are swallowed too: the wiring
+  table in `CHANGES-output.md` section 8 is the fix.
 * `MODE_FOLLOWS_FOCUS`: if FL does not report `ui.getFocused(widMixer)` right after `ui.setFocused(widMixer)`, the Bank
   button would toggle back on the next event; set it False then.
 * The pitch wheel is forwarded to the plugin port AND applied to the channel pitch (stock did both); whether that double
   bends a native instrument is unverified and unchanged.
 * Nothing here has run in FL 26.1.6; `plugins.getParamCount`, `patterns.patternMax`, `channels.selectedChannel`,
   `plugins.getPluginName` are new input-side calls (all in the API stubs and modelled by `tests/flsim`).
+
+## Review round 1 (guide acceptance): unmapped events per port
+
+Applied from the first adversarial review (details, tests and the other eight findings: `CHANGES-output.md` section 8).
+
+| review id | severity | what was wrong | decision | test(s) |
+|---|---|---|---|---|
+| **RA-01** | medium | `PASS_UNMAPPED = True` (default) left 77 of the 128 channel-1 note ids on the DAW port to FL, where each is a note on the selected channel (audible, recorded when record is armed). Panel buttons without a handler: Next/Previous with the Bank button off, Category, Preset, the 9th Select button, possibly Bank itself (guide p.12, manual 4.6); stock swallowed them all | Default **`PASS_UNMAPPED = False`** on the DAW port = stock behaviour. The finding's "better" split (swallow notes, pass CCs) was **not** taken: which unmapped CCs the DAW preset sends is UNVERIFIED, stock swallowed all of them without anyone noticing, and a phantom mod wheel/volume/sustain on the instrument is as real as a phantom note; the log names every id, so the hardware run can decide per id. Claiming notes 48/49 as "bank +-1" (the manual's Bank-off behaviour, MCU ids) was not done either: the ids are unverified | `test_review_fix_unmapped.py`; the reviewer's `test_c_ra01_*` (plain asserts now), `test_b_the_default_swallows_every_stray_on_the_daw_port`, `test_b_no_channel_1_note_id_on_the_daw_port_is_left_to_fl_by_default` |
+| **RA-04** | low | one global for two ports with opposite needs: the natural first-session sequence (`PASS_UNMAPPED = False` for the phantom notes, then `FORWARD_USE_PROCESSOR = True`) swallowed sustain, expression, volume and the mod wheel on the keyboard port, and the `UNMAPPED` line said `swallowed` for a keyboard-port CC the Forward script never swallows | The Forward script never swallows an unmapped event: `_consume` knows which port it serves (`ProcessEvent(..., where='Forward.OnMidiMsg')`) and hard-passes there. The `UNMAPPED` line prints the real disposition (`note_unmapped(..., swallowed=)`). The switch keeps its name (`PASS_UNMAPPED`, documented as DAW-port only) instead of the finding's `PASS_UNMAPPED_DAW`: with the keyboard port never consulting it there is nothing left to disambiguate, and the existing tests and docs keep working | `test_review_fix_unmapped.py`; the reviewer's `test_c_ra04*`, `test_c_ra06*` (plain asserts now) |
+
+`diffreplay` (stock vs tuned, 20,000 events, seed 1): ops whose `handled` flag differs from stock 4,054 -> 2,888 (the F-03 groups are gone);
+no regression, no `FLCrash`, no escaping exception.

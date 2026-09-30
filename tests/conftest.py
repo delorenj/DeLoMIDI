@@ -13,6 +13,7 @@ Two kinds of tests (see docs/tuned/TESTING.md):
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,13 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.xfail(reason="stock bug %s: fixed only in the tuned scripts" % ids, strict=True))
         elif soft:
             item.add_marker(pytest.mark.xfail(reason="fix for %s not landed yet" % ids, strict=False))
+
+
+@pytest.fixture(autouse=True)
+def _private_tempdir(tmp_path_factory, monkeypatch):
+    """KLTLog falls back to <temp>/klt.log when its own path is unusable (review R-HS-03): a test that breaks LOG_PATH on
+    purpose must not write into the real temp folder, so every test gets a private one."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path_factory.mktemp("tmp")))
 
 
 class Target:

@@ -50,6 +50,7 @@ _deinitialized = False       # OnDeInit ran: FL may be closing the port, nothing
 _led_due = 0.0               # KLT O-02: monotonic time the next polled-LED pass is due
 _reported = set()            # KLT O-04: (routine, exception type, 30 s window) already written to the log
 _full_at = -1e9              # KLT O-08: monotonic time of the last OnDoFullRefresh that forgot the keyboard's state
+_wired = None                # KLT O-01: the port number the first event of this OnInit arrived on (event.port, no native call)
 
 # KLT O-05: the memory-switch SysEx (payload 02 00 00 15 00) after which the keyboard has to be repainted
 MEMORY_SWITCH = b'\xf0\x00 k\x7fB\x02\x00\x00\x15\x00\xf7'
@@ -131,8 +132,21 @@ class MidiControllerConfig :
 # KLT O-04: every FL callback below is wrapped in KLTLog.guarded, so one failing routine cannot stop the others and FL's
 # Script output is not flooded by the same traceback every 20 ms (the log keeps one per site and second).
 
+def _note_wiring(event):
+    """KLT O-01: the numeric port this script receives on, from the event itself (FlMidiMsg.port), so that the wiring rule can
+    name it without device.getPortNumber() (a probe-profile call). One klt.log line per OnInit, at the first event."""
+    global _wired
+    port = getattr(event, 'port', None)
+    _wired = port if isinstance(port, int) and port >= 0 else -1      # -1: asked, nothing to say (never asked again)
+    if _wired >= 0:
+        KLTLog.log('wiring: the DAW script received its first event on port %d: its MIDI output must be on port %d as well '
+                   'and no other MIDI output may use port %d (the main KeyLab output must be 1, or disabled)' % (port, port, port))
+
+
 @KLTLog.guarded
 def OnMidiMsg(event) :
+    if _wired is None :
+        _note_wiring(event)             # KLT O-01: the first event says which port the DAW input is on
     if _processor is not None and not _deinitialized :   # KLT O-04: no processor before OnInit, none after OnDeInit
         _processor.ProcessEvent(event)
 
@@ -179,14 +193,18 @@ def _probe(fn, name=None):
 
 def _banner():
     """KLT O-15: one line that tells klt.log (and FL's Script output) what FL 2026 did to this script. The stock printed
-    three lines that said nothing about the output. Device queries beyond isAssigned() are made only when the script
-    has an output: the FL 26.1.6 crash on tom (docs/incidents) is a native null read from a device.* call."""
-    parts = ['%s v%s' % (KLT_NAME, KLT_VERSION), 'python %s' % sys.version.split()[0],
-             'FL api %s' % _probe(general.getVersion, 'general.getVersion()')]
+    three lines that said nothing about the output. The default makes device.isAssigned() the only native query (Image-Line's
+    MackieCU asks the same); general.getVersion and the device queries beyond it belong to the probe profile
+    (LOG_DEVICE_DETAILS) and are made only when the script has an output: the FL 26.1.6 crash on tom (docs/incidents) is a
+    native null read from a device.* / general.* call whose identity is unproven."""
+    details = bool(getattr(CFG, 'LOG_DEVICE_DETAILS', False))
+    parts = ['%s v%s' % (KLT_NAME, KLT_VERSION), 'python %s' % sys.version.split()[0]]
+    if details:
+        parts.append('FL api %s' % _probe(general.getVersion, 'general.getVersion()'))
     assigned = _probe(device.isAssigned, 'device.isAssigned()')
     parts.append('device.isAssigned=%s' % (assigned,))
     port = None
-    if assigned is True and getattr(CFG, 'LOG_DEVICE_DETAILS', True):
+    if assigned is True and details:
         parts.append('isMidiOutAssigned=%s' % _probe(lambda: device.isMidiOutAssigned(), 'device.isMidiOutAssigned()'))
         port = _probe(device.getPortNumber, 'device.getPortNumber()')
         parts.append('port=%s' % (port,))
@@ -195,7 +213,7 @@ def _banner():
             did = _probe(device.getDeviceID, 'device.getDeviceID()')
             parts.append('deviceID=%s' % (did.hex() if isinstance(did, (bytes, bytearray)) else did,))
     elif assigned is True:
-        parts.append('port/name/isMidiOutAssigned not queried: LOG_DEVICE_DETAILS is off')
+        parts.append('FL api/port/name/isMidiOutAssigned not queried: LOG_DEVICE_DETAILS is off')
     else:
         parts.append('port/name/isMidiOutAssigned not queried: no output')
     parts.append('output=%s' % ('on' if getattr(CFG, 'OUT_ENABLED', True) else 'DISABLED by KLTConfig.OUT_ENABLED'))
@@ -204,8 +222,20 @@ def _banner():
     print(line)
     KLTLog.log('cfg: %s' % ' '.join('%s=%s' % (k, getattr(CFG, k, '?')) for k in (
         'OUT_MAX_SYSEX_PER_SEC', 'OUT_MAX_SYSEX_PER_TICK', 'OUT_LCD_MIN_GAP_S', 'OUT_LED_PASS_S', 'OUT_TRICKLE_S',
+        'OUT_KEEPALIVE_CYCLE_S', 'OUT_DEFER_TO_IDLE', 'OUT_REQUIRE_MIDIOUT_ASSIGNED', 'LOG_DEVICE_DETAILS',
         'INIT_ANIMATION', 'SPLASH_MS', 'SPLASH_TAG_MS', 'LCD_SCROLL_MS', 'PAD_LED_FLIP_ROWS', 'SAVE_LED_FOLLOWS_MODE',
         'GROUP_RELATIVE_CHANNELS')))
+    # KLT O-01: isAssigned() only proves that SOME output is linked to this script by port number; nothing in FL's API says
+    # which one or whether it is alive. Say what the wiring must be, so a silent dark keyboard has an obvious first suspect.
+    if isinstance(port, int) and port >= 0:
+        who = ('this script is on port %d: its MIDI output must be on the same port number and no other MIDI output may '
+               'use port %d' % (port, port))
+    else:
+        who = ('the DAW script needs its MIDI output (MIDIOUT2) on the same port number as its input (MIDIIN2, guide: 0) '
+               'and no other MIDI output may use that number')
+    KLTLog.log('wiring: %s (the main KeyLab output must be 1, or disabled). isAssigned() only proves an output is linked by '
+               'port number, not that it reaches the keyboard: the acceptance test is the greeting "KeyLab mkII" / "tuned v%s" '
+               'on the keyboard LCD' % (who, KLT_VERSION))
     if port == 10:
         KLTLog.log('WARNING: this script is on port 10, the port Arturia Analog Lab listens on for forwarded CCs; '
                    'the guide puts the DAW script on port 0 and the MIDI script on port 1 (docs/analysis O-11)')
@@ -256,24 +286,54 @@ def _start_splash():
     pd.SetActivePage('welcome', expires=max(splash, 0) + max(tag, 0))
 
 
-def _repaint():
+def _repaint(sync=True):
     """KLT O-05: show everything again (memory switch, output re-assigned, FL asked for a full refresh). The LCD forgets
-    what it believes it shows; the LED routines run now and their frames go through the shadow state."""
+    what it believes it shows; the LED routines run now and their frames go through the shadow state. sync=False leaves the
+    LCD text alone (settle repaints: the text has not changed, only the keyboard may have forgotten it)."""
     global _led_due
     if _mk2 is None or _deinitialized:
         return
     _led_due = 0.0
     _step('Display.Invalidate', _mk2.display().Invalidate)
-    _refresh_leds()
+    _refresh_leds(sync)
 
 
-def _refresh_leds():
+def _paint_pads_and_transport(lr):
+    # KLT O-12: the LEDs that follow FL state but are not polled from OnIdle (pads, Play/Stop/Record)
+    _step('SequencerReturn', lr.SequencerReturn)
+    _step('PlayReturn', lr.PlayReturn)
+    _step('RecordReturn', lr.RecordReturn)
+
+
+def _refresh_leds(sync=True):
     lr = _mk2.LightReturn()
     with KLTDispatch.batch():
-        _step('Sync', _mk2.Sync)
-        _step('SequencerReturn', lr.SequencerReturn)
-        _step('PlayReturn', lr.PlayReturn)
-        _step('RecordReturn', lr.RecordReturn)
+        if sync:
+            _step('Sync', _mk2.Sync)
+        _paint_pads_and_transport(lr)
+
+
+def _paint_after_init():
+    """KLT O-12: pads and Play/Stop/Record were painted only from OnRefresh, which nobody has shown FL 26.1.6 sends after
+    OnInit; with the init animation off nothing else lights them. Once the init sequence is done they are painted by the
+    script's own means (idempotent: frames identical to what an OnRefresh queued are not sent twice)."""
+    if _mk2 is None or _deinitialized:
+        return
+    with KLTDispatch.batch():
+        _paint_pads_and_transport(_mk2.LightReturn())
+
+
+def _repaint_after_reconnect():
+    # KLT O-05: the output (re)appeared: repaint now and once more when the keyboard has certainly settled
+    _repaint()
+    KLTDispatch.schedule_settle()
+
+
+def _settle_repaint():
+    """KLT O-05: the keyboard may have finished resetting itself only after the immediate repaint landed (a memory switch
+    resets its LEDs on its own schedule): believe nothing, send everything again."""
+    KLTDispatch.resync()
+    _repaint(sync=False)
 
 
 def _noisy_only(flags):
@@ -294,7 +354,9 @@ def _noisy_only(flags):
 
 @KLTLog.guarded   # KLT O-04: every callback is guarded
 def OnInit():
-    global _deinitialized, _led_due
+    global _deinitialized, _led_due, _wired
+    _wired = None
+    KLTLog.retry_now()      # KLT O-15: a log path that failed before this (re)load is tried again now, not after the back-off
     print("### %s v%s: OnInit start ###" % (KLT_NAME, KLT_VERSION))    # KLT O-15: stock's lines claimed success before it
     _deinitialized = False
     _step('banner', _banner)
@@ -398,6 +460,7 @@ def OnDoFullRefresh():
         _full_at = now
         KLTDispatch.resync()
     _repaint()
+    KLTDispatch.schedule_settle()       # KLT O-05: and again once the keyboard has settled
 
 
 # Function called when a project is loaded
@@ -426,7 +489,11 @@ def OnIdle():
     with KLTDispatch.batch():
         _step('InitStep', lr.InitStep)      # first: it holds the LEDs again if the output only just appeared
         if KLTDispatch.take_resync():
-            _step('repaint after reconnect', _repaint)
+            _step('repaint after reconnect', _repaint_after_reconnect)
+        if lr.take_paint():
+            _step('paint after init', _paint_after_init)          # KLT O-12: pads and transport LEDs without an OnRefresh
+        if KLTDispatch.take_settle():
+            _step('settle repaint', _settle_repaint)              # KLT O-05: the keyboard may have reset itself late
         _step('Idle', _mk2.Idle)
         _step('RefreshTime', lr.RefreshTime)
         now = time.monotonic()
@@ -459,3 +526,4 @@ def OnSysEx(event) :
         KLTDispatch.resync()
         ui.setFocused(1)
         _repaint()          # KLT O-05: LCD invalidated, LED pass forced, Sync + pads + transport LEDs (what OnRefresh(32) did)
+        KLTDispatch.schedule_settle()       # KLT O-05: the keyboard resets its LEDs on its own schedule: paint again later too

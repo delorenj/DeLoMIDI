@@ -158,10 +158,13 @@ def raw_log(where, event):
         pass
 
 
-def note_unmapped(event, where):
+def note_unmapped(event, where, swallowed=None):
     # KLT F-03: an event no handler claimed. Logged once per distinct (port, status, data1) and again at x10/x100/x1000;
-    # what happens to it is KLTConfig.PASS_UNMAPPED (the callers apply it).
+    # what happens to it is the caller's decision, passed as `swallowed` so the line says what really happens (None = the
+    # DAW-port rule, KLTConfig.PASS_UNMAPPED; the keyboard-port callers pass False: the Forward script never swallows).
     try:
+        if swallowed is None:
+            swallowed = not CFG.PASS_UNMAPPED
         st = event.status
         if st >= 0xF0 or not (CFG.LOG_UNMAPPED and CFG.LOG_ENABLED):
             return
@@ -176,6 +179,6 @@ def note_unmapped(event, where):
         if n in (1, 10, 100, 1000):
             KLTLog.log('UNMAPPED %s port=%s %s st=0x%02X d1=%d d2=%d (seen %d time%s, %s)' % (
                 where, key[0], _kind_name(st), st, event.data1, event.data2, n, '' if n == 1 else 's',
-                'passed to FL' if CFG.PASS_UNMAPPED else 'swallowed'))
+                'swallowed' if swallowed else 'passed to FL'))
     except Exception:
         pass

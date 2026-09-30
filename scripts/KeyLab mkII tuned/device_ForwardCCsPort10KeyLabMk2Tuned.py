@@ -96,7 +96,7 @@ def OnMidiIn(event):
                 if proc is not None and proc.handle_keyboard_cc(event):
                     return
             if not (CFG.FORWARD_USE_PROCESSOR and 'cc' in CFG.FORWARD_PROCESSOR_KINDS):
-                AKLmk2.note_unmapped(event, 'forward-cc')   # KLT F-03: logged, never swallowed (OnMidiMsg may still map it)
+                AKLmk2.note_unmapped(event, 'forward-cc', swallowed=False)   # KLT F-03: logged, never swallowed (OnMidiMsg may still map it)
         elif (status == 153 or status == 137) and CFG.FORWARD_PADS:
             # KLT F-01, F-05, F-06, F-07: pads arriving on the keyboard port, raw fields only. handled is whatever the pad
             # logic decided (Sequencer mode consumes the pad; stock's `handled = False` afterwards let it also play a note)

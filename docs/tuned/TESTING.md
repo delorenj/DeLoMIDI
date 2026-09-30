@@ -162,7 +162,9 @@ duplicate parameters.
   callback are caught and recorded in `host.errors` like FL's Script output (`invoke()` lets them propagate);
 * **H1/H2**: `Host(midi_in_populated=True|False)` or `deliver_midi(..., populated=...)` decide whether `midiId`/`midiChan`
   are filled in `OnMidiIn` (docs/analysis/02 3.3). Forward-script tests run under both;
-* `ScriptSet.boot(order=...)`: OnInit + a full OnRefresh, in the given order of the two device scripts.
+* `ScriptSet.boot(order=...)`: OnInit + a full OnRefresh (`refresh_flags=None` = none), in the given order of the two device
+  scripts. **No OnIdle runs in `boot()`**: since review round 1 the tuned scripts send nothing before the first OnIdle tick
+  (`OUT_DEFER_TO_IDLE`), so a test that looks at SysEx or at the output gate right after `boot` idles first.
 
 ### State model (what the fakes do)
 
@@ -179,7 +181,9 @@ FPT_LoopRecord)`, plugin parameters per channel, tempo (`getCurrentTempo(1)` = m
   the documented "roughly 20 ms"), real timing of anything, FL's own reaction to an invalid index (recorded as a
   violation, never asserted to crash), what `device.midiOutSysex` really does with no output (both hypotheses are
   switchable), whether FL runs the two device scripts in one interpreter (the sim assumes yes, the best case: F-17),
-  which script FL initialises first (`boot(order=)`), whether `OnRefresh` follows `OnInit` (the sim sends a full one).
+  which script FL initialises first (`boot(order=)`), whether `OnRefresh` follows `OnInit` (the sim sends a full one; since
+  review round 1 the tuned scripts paint pads and Play/Stop/Record LEDs by themselves once the init sequence is done, and the
+  `test_review_fix_paint.py` tests boot with `scripts.boot(refresh_flags=None)`, i.e. without it).
 * Channel Rack groups / the group-relative index of API v33+ (F-13); `pmeFlags` semantics; plugin parameter lists of the
   real plugins (indices in the database are unverified: docs/analysis/02 5.3); FL's clamping of pan/volume values.
 * The keyboard: the hardware contract (button = note-on ch1 velocity 127/0 vs note-off, encoders CC16..24, jog CC60,
@@ -202,6 +206,17 @@ FPT_LoopRecord)`, plugin parameters per channel, tempo (`getCurrentTempo(1)` = m
   the Forward caller.
 * Fuzz over both hypotheses reproduces every exception site from the audits and adds the empty-rack case (index 0 of an
   empty Channel Rack) and `getCurrentStepParam == -1`.
+
+## Review round 1 tests
+
+`tests/test_review_fix_gate.py` (minimal device-call profile, deferral, `isMidiOutAssigned` opt-in, wiring lines),
+`test_review_fix_log.py` (KLTLog folder creation, fallback paths, back-off), `test_review_fix_paint.py` (paint without an
+`OnRefresh`, keep-alive cycle and rate, settle repaints), `test_review_fix_unmapped.py` (unmapped events per port). They are
+tuned-only. `tests/conftest.py` gives every test a private temp folder (`tempfile.tempdir`), because KLTLog now falls back to
+`<temp>/klt.log` when its own path is unusable and a test that breaks the path on purpose must not write into the real one.
+`tests/test_review_acceptance_*.py` (the reviewers' files): the strict xfails of the fixed findings became plain asserts
+(RA-01, RA-03 folder half, RA-04, RA-04b, RA-06, RA-10, RA-10b); RA-02, RA-03 reload half, RA-05, RA-07 and RA-09 are still
+strict xfails.
 
 ## Adding to the suite
 
