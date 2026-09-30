@@ -5,6 +5,7 @@
 #   tomctl do "click 100 200; key F10" [name]   input commands (';'-separated) then screenshot
 #   tomctl ps 'Get-Process FL64'       PowerShell on tom as the admin account (session 0)
 #   tomctl put <local> <C:/win/path>   copy a file to tom      tomctl get <C:/win/path> <local>   copy back
+#   tomctl deploy <local_dir> [name]   copy *.py of a script folder into jarad's FL Hardware dir (folder name = name or basename)
 #   tomctl up                          exit 0 if tom answers SSH
 set -euo pipefail
 OUT=${TOMCTL_OUT:-/tmp/tomctl}; mkdir -p "$OUT"
@@ -26,6 +27,11 @@ case "${1:-}" in
   ps)   t "powershell -NoProfile -NonInteractive -Command -" <<<"${2:?powershell text}" ;;
   put)  cp_ "${2:?local}" "tom:${3:?remote}" ;;
   get)  cp_ "tom:${2:?remote}" "${3:?local}" ;;
+  deploy) src=${2:?local script dir}; name=${3:-$(basename "$src")}
+        hw='C:/Users/jarad/Documents/Image-Line/FL Studio/Settings/Hardware'
+        t "powershell -NoProfile -NonInteractive -Command -" <<<"\$d='C:\\Users\\jarad\\Documents\\Image-Line\\FL Studio\\Settings\\Hardware\\$name'; New-Item -ItemType Directory -Force \$d | Out-Null; Get-ChildItem \$d -Filter *.py -ErrorAction SilentlyContinue | Remove-Item -Force; 'ready: ' + \$d" 
+        for f in "$src"/*.py; do cp_ "$f" "tom:$hw/$name/$(basename "$f")"; done
+        t "powershell -NoProfile -NonInteractive -Command -" <<<"Get-ChildItem 'C:\\Users\\jarad\\Documents\\Image-Line\\FL Studio\\Settings\\Hardware\\$name' | Select Name,Length | Format-Table -Auto | Out-String" ;;
   up)   t "echo up" >/dev/null 2>&1 ;;
   *)    sed -n '2,10p' "$0"; exit 2 ;;
 esac
