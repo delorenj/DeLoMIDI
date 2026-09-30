@@ -5,8 +5,9 @@ controls it, and which test proves it. Finding ids (`O-xx`) are from `docs/analy
 `02-input-audit.md`. Files owned by this side: `device_KeyLabmk2Tuned.py`, `KLTDispatch.py`, `KLTDisplay.py`, `KLTPages.py`,
 `KLTReturn.py` and the "output side" section of `KLTConfig.py`. Every changed line carries a `# KLT <id>: why` comment.
 
-**Nothing here has run in FL 26.1.6 or against the keyboard.** Everything is verified in the flsim simulator
-(`docs/tuned/TESTING.md`); the tom crash and every hardware-dependent choice below remain hypotheses until tom is back.
+The tuned scripts are running on tom's FL 26.1.6. The user confirmed DAW Live mode and channel/pattern text on the
+keyboard LCD; live output counters show zero errors. Simulator results remain separate from physical acceptance of
+each control. The REC/LOOP display follow-up and its live timing evidence are in [TRANSPORT-STATUS.md](TRANSPORT-STATUS.md).
 
 ## 1. Design in one page
 

@@ -111,18 +111,13 @@ class NavigationMode:
     
     
     def RecordRefresh(self) :
-        if transport.isRecording() :
-            self._paged_display.SetPageLines('RecordOn',
-                                            line1= 'Record',
-                                            line2= 'ON'
-                                            )
-            self._paged_display.SetActivePage('RecordOn', expires=self._display_ms)
-        else :
-            self._paged_display.SetPageLines('RecordOff', 
-                                            line1= 'Record',
-                                            line2= 'OFF'
-                                            )
-            self._paged_display.SetActivePage('RecordOff', expires=self._display_ms)
+        # KLT H-TRANSPORT-STATE: FL can apply a transport command after its callback returns; a snapshot keeps the
+        # previous state on the LCD. Re-read the actual host state on every page refresh, including OnIdle.
+        self._paged_display.SetPageLines('Record',
+                                        line1= 'Record',
+                                        line2= lambda: 'ON' if transport.isRecording() else 'OFF'
+                                        )
+        self._paged_display.SetActivePage('Record', expires=self._display_ms)
 
             
     def RewindRefresh(self) :
@@ -146,18 +141,13 @@ class NavigationMode:
             
             
     def LoopRefresh(self) :
-        if ui.isLoopRecEnabled() :
-            self._paged_display.SetPageLines('LoopOn', 
-                                            line1= 'Loop Mode',
-                                            line2= 'ON'
-                                            )
-            self._paged_display.SetActivePage('LoopOn', expires=self._display_ms)
-        else :
-            self._paged_display.SetPageLines('LoopOff',
-                                            line1= 'Loop Mode',
-                                            line2= 'OFF'                             
-                                            )
-            self._paged_display.SetActivePage('LoopOff', expires=self._display_ms)
+        # KLT H-TRANSPORT-STATE: on tom, FPT_LoopRecord queues the toggle and isLoopRecEnabled still returns the old
+        # value in this callback. A live page follows the settled FL state instead of displaying its inverse for 1 s.
+        self._paged_display.SetPageLines('Loop',
+                                        line1= 'Loop Mode',
+                                        line2= lambda: 'ON' if ui.isLoopRecEnabled() else 'OFF'
+                                        )
+        self._paged_display.SetActivePage('Loop', expires=self._display_ms)
  
  
     def OverdubRefresh(self) :
