@@ -1,6 +1,7 @@
 # MIT License
 # Copyright (c) 2020 Ray Juang
 
+import KLTLog     # KLT O-04: a failing page line is logged, not raised
 from KLTDisplay import KeyLabDisplay
 
 
@@ -27,10 +28,12 @@ class KeyLabPagedDisplay:
         self._last_update_ms = 0
 
     def SetPageLines(self, page_name, line1=None, line2=None):
+        # KLT O-04: a line may be a callable returning the text (re-evaluated on every refresh), which lets the welcome
+        # page change its second line after a while without a timer or a blocking sleep; plain text works as before
         if line1 is not None:
-            self._line1[page_name] = lambda: line1
+            self._line1[page_name] = line1 if callable(line1) else (lambda: line1)
         if line2 is not None:
-            self._line2[page_name] = lambda: line2
+            self._line2[page_name] = line2 if callable(line2) else (lambda: line2)   # KLT O-04: as line1
         if self._active_page == page_name:
             self._update_display(False)
 
@@ -61,10 +64,14 @@ class KeyLabPagedDisplay:
         if active_page is not None:
             line1 = None
             line2 = None
-            if active_page in self._line1:
-                line1 = self._line1[active_page]()
-            if active_page in self._line2:
-                line2 = self._line2[active_page]()
+            # KLT O-04: one page whose text cannot be produced must not stop the display from refreshing
+            try:
+                if active_page in self._line1:
+                    line1 = self._line1[active_page]()
+                if active_page in self._line2:
+                    line2 = self._line2[active_page]()
+            except Exception:
+                KLTLog.exception('KLTPages page %r' % (active_page,))
             self._display.SetLines(line1=line1, line2=line2)
 
     def Refresh(self):

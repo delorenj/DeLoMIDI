@@ -52,8 +52,9 @@ class NavigationMode:
             self._paged_display.SetActivePage('NoPlugin', expires=self._display_ms)
   
   
-    def VolumeMixerRefresh(self, event, value) :
-        track = str((event.controlNum - 1) + (8*AKLmk2.MX_OFFSET))
+    def VolumeMixerRefresh(self, track, value) :
+        # KLT F-08: the caller passes the mixer track; stock read it back from an event it had rewritten into a CC
+        track = str(track)
         self._paged_display.SetPageLines('Volume',
                                         line1= 'Volume - ' + track,
                                         line2= value + '%'
@@ -61,8 +62,9 @@ class NavigationMode:
         self._paged_display.SetActivePage('Volume', expires=self._display_ms)
 
         
-    def PanMixerRefresh(self, event, value) :
-        track = str((event.controlNum - 15) + (8*AKLmk2.MX_OFFSET))
+    def PanMixerRefresh(self, track, value) :
+        # KLT F-08: the caller passes the mixer track (stock showed the master as track 9 here, as 0 for the volume)
+        track = str(track)
         self._paged_display.SetPageLines('Pan',
                                         line1= 'Pan - ' + track,
                                         line2= value + '%'
@@ -167,7 +169,7 @@ class NavigationMode:
    
             
     def CutRefresh(self) :
-        channelnum = str(channels.channelNumber() + 1)
+        channelnum = str(AKLmk2.sel_channel() + 1)     # KLT F-13: group-relative selection, 0 when the rack is empty
         patternnum = str(patterns.patternNumber())
         self._paged_display.SetPageLines('Cut',
                                         line1= 'Pattern ' + patternnum,

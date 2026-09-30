@@ -35,7 +35,14 @@ V_COL = ['Analog Lab V',
          'Vox Continental V2',
          'Wurli V2'
          ]
-         
+
+# KLT F-15: the Forward script tested every event against the list with a Python loop; a set lookup does the same
+V_COL_SET = frozenset(V_COL)
+
+def is_v_collection(name) :
+    # KLT F-15: exact-name match, as before (a plugin's name, a channel's name, or ui.getFocusedPluginName())
+    return name in V_COL_SET
+
 
 class ArturiaVCOLLECTION() :
     
@@ -47,7 +54,7 @@ class ArturiaVCOLLECTION() :
         return self._v_col
    
     def AddVST(self) :
-        string = channels.getChannelName(channels.channelNumber())
+        string = channels.getChannelName(channels.selectedChannel())    # KLT F-13: group-relative, like getChannelName's default
         present = False
         for i in self._v_col :
             if string == i :

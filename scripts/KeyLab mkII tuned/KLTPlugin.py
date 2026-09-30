@@ -3,17 +3,21 @@ import plugins
 import channels
 import ui
 import midi
+import KLTCrossKeyboard as AKLmk2      # KLT F-13: sel_channel(), rel_ticks()
+import KLTLog                          # KLT F-16: one-time notes about stale database indices
 # Global variable
 
-#ABSOLUTE VALUE
-ABSOLUTE_VALUE = 64
+# KLT F-10: the 8 encoders (database keys '16'..'23') are relative; everything else in the database is absolute
+RELATIVE_CLEFS = ('16', '17', '18', '19', '20', '21', '22', '23')
+TICK = 2/127        # one encoder tick = 2/127 of the parameter range (stock: +2 on a 0..127 scale)
 
-def Plugin(event, clef) :
+def Plugin(event, clef, absolute = False) :
+    # KLT F-02: `absolute` lets a caller that knows its control sends absolute values (Analog Lab's knobs) reuse the
+    # encoder rows of the database
 
     recognized_plugin = False
     plugin_name = ui.getFocusedPluginName()
-    
-    global ABSOLUTE_VALUE
+    # KLT F-10: no module-level accumulator any more (ABSOLUTE_VALUE, RelativeToAbsolute), see the tick decode at the end
     
     if plugin_name == 'FLEX' :
         recognized_plugin = True
@@ -374,47 +378,33 @@ def Plugin(event, clef) :
                 '1':43
                 }
                 
-    if recognized_plugin :    
-        cle = str(clef)
-        PLUGIN_PARAM = PARAM_MAP.get(cle)
-        
-        if event.status == midi.MIDI_CONTROLCHANGE :
-            ABSOLUTE_VALUE = int(127*plugins.getParamValue(PLUGIN_PARAM ,channels.channelNumber()))
-            if event.data2 < 64 :
-                event.data2 = RelativeToAbsolute(event)
-            else :
-                event.data2 = RelativeToAbsolute(event)
+    # KLT F-16: an unmapped slot (-1) and a control the database does not know (None) are decided BEFORE any plugins.* call
+    # (stock asked for getParamValue(-1, ...) first), and the parameter must exist on the plugin
+    PLUGIN_PARAM = PARAM_MAP.get(str(clef)) if recognized_plugin else None
+    channel = AKLmk2.sel_channel()      # KLT F-13, O-08: group-relative index, -1 when there is no channel to address
+    if PLUGIN_PARAM is None or PLUGIN_PARAM < 0 or channel < 0 :
+        return "", ""
+    try :
+        if PLUGIN_PARAM >= plugins.getParamCount(channel) :
+            KLTLog.log_once(('plugin-param-range', plugin_name, PLUGIN_PARAM),
+                            'plugin database: %s parameter %d does not exist on this plugin (stale index?)' % (plugin_name, PLUGIN_PARAM))
+            return "", ""
+    except Exception :
+        KLTLog.exception('KLTPlugin.Plugin getParamCount')
+        return "", ""
 
-
-        if PLUGIN_PARAM != -1 :
-            value = event.data2/127
-            plugins.setParamValue(value,PLUGIN_PARAM ,channels.channelNumber())
-            event.handled = False
-            param = str(plugins.getParamName(PLUGIN_PARAM, channels.channelNumber()))
-            value = str(round(100*plugins.getParamValue(PLUGIN_PARAM, channels.channelNumber())))
-        else :
-            param = ""
-            value = "" 
+    if str(clef) in RELATIVE_CLEFS and not absolute :
+        # KLT F-10: encoders are relative: move by the tick count from the plugin's live value (stock re-seeded an int()
+        # copy of it every event and added 2*data2 in 1/127 steps, so nothing below 1/127 survived)
+        value = plugins.getParamValue(PLUGIN_PARAM, channel) + AKLmk2.rel_ticks(event.data2) * TICK
     else :
-        param = ""
-        value = ""
-        
+        # KLT F-10: faders and the mod wheel are absolute (stock read the mod wheel's value as a relative tick count)
+        value = event.data2/127
+    value = min(1.0, max(0.0, value))
+    plugins.setParamValue(value, PLUGIN_PARAM, channel)
+    # KLT F-08: no event.handled = False here; whether the event is consumed is decided once by the caller
+    param = str(plugins.getParamName(PLUGIN_PARAM, channel))
+    value = str(round(100*plugins.getParamValue(PLUGIN_PARAM, channel)))
     return param, value
-    
 
-
-    # UTILITY 
-
-
-
-def RelativeToAbsolute(event) :
-        global ABSOLUTE_VALUE
-        if event.data2 < 64 :
-            ABSOLUTE_VALUE += 2*event.data2
-        else :
-            ABSOLUTE_VALUE -= 2*(event.data2-64)
-        if ABSOLUTE_VALUE > 127 :
-            ABSOLUTE_VALUE = 127
-        elif ABSOLUTE_VALUE < 0 :
-            ABSOLUTE_VALUE = 0
-        return ABSOLUTE_VALUE
+# KLT F-10: stock's RelativeToAbsolute() (an int() re-seed of the live value plus 2*data2) is replaced by the tick decode above
